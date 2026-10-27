@@ -6,6 +6,6 @@ void main() {
     await tester.pumpWidget(const DocChatApp());
     await tester.pumpAndSettle();
     expect(find.text('DocChat'), findsNothing); // In drawer
-    expect(find.byType(DocChatApp), findsOneWidget);
+    expect(find.byType(DocChatApp), findsOneWidget); // test comment
   });
 }
