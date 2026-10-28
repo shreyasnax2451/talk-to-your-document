@@ -1,17 +1,41 @@
+/// A cited passage location: which document and page an answer drew on.
+class SourceRef {
+  final String docId;
+  final String docName;
+  final int page;
+
+  const SourceRef({
+    required this.docId,
+    required this.docName,
+    required this.page,
+  });
+
+  Map<String, Object> toJson() => {'docId': docId, 'docName': docName, 'page': page};
+
+  factory SourceRef.fromJson(Map<String, dynamic> json) => SourceRef(
+        docId: json['docId'] as String,
+        docName: json['docName'] as String,
+        page: json['page'] as int,
+      );
+}
+
 class ChatMessage {
   final String id;
   String text;
   final bool isUser;
   final DateTime timestamp;
-  final List<String> sourceFileNames;
+  List<SourceRef> sources;
   bool isStreaming;
+
+  /// Progress shown while an answer has no text yet (not persisted).
+  String? statusText;
 
   ChatMessage({
     required this.id,
     required this.text,
     required this.isUser,
     required this.timestamp,
-    this.sourceFileNames = const [],
+    this.sources = const [],
     this.isStreaming = false,
   });
 
@@ -20,7 +44,7 @@ class ChatMessage {
     String? text,
     bool? isUser,
     DateTime? timestamp,
-    List<String>? sourceFileNames,
+    List<SourceRef>? sources,
     bool? isStreaming,
   }) {
     return ChatMessage(
@@ -28,7 +52,7 @@ class ChatMessage {
       text: text ?? this.text,
       isUser: isUser ?? this.isUser,
       timestamp: timestamp ?? this.timestamp,
-      sourceFileNames: sourceFileNames ?? this.sourceFileNames,
+      sources: sources ?? this.sources,
       isStreaming: isStreaming ?? this.isStreaming,
     );
   }

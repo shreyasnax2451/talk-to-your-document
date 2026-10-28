@@ -91,6 +91,7 @@ class _ChatScreenState extends State<ChatScreen> {
         onNewChat: () {
           appState.createNewChat();
         },
+        onChatSelected: () {},
       ),
       appBar: AppBar(
         leading: IconButton(
@@ -295,7 +296,7 @@ class _ChatScreenState extends State<ChatScreen> {
               tooltip: 'Attach PDF',
               onPressed: () async {
                 final messenger = ScaffoldMessenger.of(context);
-                await appState.pickAndUploadDocument();
+                if (!await appState.pickAndUploadDocument()) return;
                 messenger.showSnackBar(
                   const SnackBar(
                     backgroundColor: AppTheme.surface,
@@ -338,16 +339,22 @@ class _ChatScreenState extends State<ChatScreen> {
                     ? AppTheme.accent
                     : const Color(0xFF383835),
               ),
+              // Turns into a Stop button while an answer is being written.
               child: IconButton(
                 padding: EdgeInsets.zero,
-                icon: const Icon(
-                  Icons.arrow_upward_rounded,
+                tooltip: appState.isGenerating ? 'Stop' : 'Send',
+                icon: Icon(
+                  appState.isGenerating
+                      ? Icons.stop_rounded
+                      : Icons.arrow_upward_rounded,
                   color: Colors.white,
                   size: 20,
                 ),
-                onPressed: _canSend && !appState.isGenerating
-                    ? () => _handleSend()
-                    : null,
+                onPressed: appState.isGenerating
+                    ? appState.stopGeneration
+                    : _canSend
+                        ? () => _handleSend()
+                        : null,
               ),
             ),
           ],

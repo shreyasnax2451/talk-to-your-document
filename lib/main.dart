@@ -1,13 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:pdfrx/pdfrx.dart';
 import 'package:provider/provider.dart';
 import 'providers/app_state.dart';
 import 'theme/app_theme.dart';
 import 'screens/chat_screen.dart';
 import 'screens/library_screen.dart';
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await pdfrxFlutterInitialize();
   
   // Set system navigation overlay styling for seamless dark mode
   SystemChrome.setSystemUIOverlayStyle(

@@ -8,10 +8,14 @@ class AppSidebar extends StatelessWidget {
   final VoidCallback onOpenLibrary;
   final VoidCallback onNewChat;
 
+  /// Called after a chat in Recents is selected, so the host can show it.
+  final VoidCallback onChatSelected;
+
   const AppSidebar({
     super.key,
     required this.onOpenLibrary,
     required this.onNewChat,
+    required this.onChatSelected,
   });
 
   void _showChatOptions(BuildContext context, ChatSession session) {
@@ -359,6 +363,7 @@ class AppSidebar extends StatelessWidget {
                       onTap: () {
                         appState.selectChat(session.id);
                         Navigator.of(context).pop(); // close drawer
+                        onChatSelected();
                       },
                       onLongPress: () => _showChatOptions(context, session),
                       child: Container(

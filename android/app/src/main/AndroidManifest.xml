@@ -1,4 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- llamadart fetches models from Hugging Face until the custom model download exists. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="docchat"
         android:name="${applicationName}"

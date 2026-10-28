@@ -43,6 +43,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
           widget.onNewChat();
           widget.onNavigateToChat();
         },
+        onChatSelected: widget.onNavigateToChat,
       ),
       appBar: AppBar(
         leading: IconButton(
@@ -163,7 +164,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         elevation: 3,
         onPressed: () async {
           final messenger = ScaffoldMessenger.of(context);
-          await appState.pickAndUploadDocument();
+          if (!await appState.pickAndUploadDocument()) return;
           messenger.showSnackBar(
             const SnackBar(
               backgroundColor: AppTheme.surface,

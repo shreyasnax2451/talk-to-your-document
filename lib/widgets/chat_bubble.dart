@@ -30,12 +30,15 @@ class ChatBubble extends StatelessWidget {
     );
   }
 
-  void _openSourcePdf(BuildContext context, String fileName) {
-    final doc = context.read<AppState>().getDocumentByName(fileName);
+  void _openSourcePdf(BuildContext context, SourceRef source) {
+    final doc = context.read<AppState>().getDocumentById(source.docId);
     if (doc != null) {
       Navigator.of(context).push(
         MaterialPageRoute(
-          builder: (_) => PdfViewerScreen(document: doc),
+          builder: (_) => PdfViewerScreen(
+            document: doc,
+            initialPage: source.page.clamp(1, doc.pageCount < 1 ? 1 : doc.pageCount),
+          ),
         ),
       );
     } else {
@@ -43,7 +46,7 @@ class ChatBubble extends StatelessWidget {
         SnackBar(
           backgroundColor: AppTheme.surface,
           content: Text(
-            'Document "$fileName" not found',
+            'Document "${source.docName}" was deleted',
             style: const TextStyle(color: AppTheme.failedText),
           ),
         ),
@@ -92,20 +95,28 @@ class ChatBubble extends StatelessWidget {
           // Answer text
           Container(
             padding: const EdgeInsets.symmetric(vertical: 4),
-            child: Text(
-              message.text.isEmpty && message.isStreaming
-                  ? '...'
-                  : message.text,
-              style: const TextStyle(
-                color: AppTheme.textPrimary,
-                fontSize: 15,
-                height: 1.55,
-              ),
-            ),
+            child: message.text.isEmpty && message.isStreaming
+                ? Text(
+                    message.statusText ?? '...',
+                    style: const TextStyle(
+                      color: AppTheme.textSecondary,
+                      fontSize: 14,
+                      fontStyle: FontStyle.italic,
+                      height: 1.55,
+                    ),
+                  )
+                : Text(
+                    message.text,
+                    style: const TextStyle(
+                      color: AppTheme.textPrimary,
+                      fontSize: 15,
+                      height: 1.55,
+                    ),
+                  ),
           ),
 
           // Sources row under each answer
-          if (message.sourceFileNames.isNotEmpty && !message.isStreaming) ...[
+          if (message.sources.isNotEmpty && !message.isStreaming) ...[
             const SizedBox(height: 14),
             const Text(
               'Sources',
@@ -120,10 +131,10 @@ class ChatBubble extends StatelessWidget {
             Wrap(
               spacing: 8,
               runSpacing: 6,
-              children: message.sourceFileNames.map((sourceName) {
+              children: message.sources.map((source) {
                 return InkWell(
                   borderRadius: BorderRadius.circular(10),
-                  onTap: () => _openSourcePdf(context, sourceName),
+                  onTap: () => _openSourcePdf(context, source),
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                     decoration: BoxDecoration(
@@ -141,7 +152,7 @@ class ChatBubble extends StatelessWidget {
                         ),
                         const SizedBox(width: 6),
                         Text(
-                          sourceName,
+                          '${source.docName} · p. ${source.page}',
                           style: const TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.w500,

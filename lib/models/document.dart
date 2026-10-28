@@ -7,13 +7,13 @@ enum DocumentStatus {
 class Document {
   final String id;
   String name;
-  final int pageCount;
+  int pageCount;
   final DateTime uploadDate;
   DocumentStatus status;
   double progress; // 0.0 to 1.0
   String? errorMessage;
-  final String? filePath;
-  final List<String> pages;
+  String? filePath;
+  List<String> pages;
 
   Document({
     required this.id,
