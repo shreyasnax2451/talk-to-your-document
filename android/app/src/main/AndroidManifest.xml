@@ -1,6 +1,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- llamadart fetches models from Hugging Face until the custom model download exists. -->
+    <!-- Model downloads run in the background (background_downloader). -->
     <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Download progress notifications (Android 13+ asks the user). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- Android 14+: user-initiated transfers have no background time limit. -->
+    <uses-permission android:name="android.permission.RUN_USER_INITIATED_JOBS"/>
+    <!-- Indexing runs as a foreground service so it survives leaving the app. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
     <application
         android:label="docchat"
         android:name="${applicationName}"
@@ -27,6 +34,12 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- flutter_local_notifications' foreground service, used while indexing. -->
+        <service
+            android:name="com.dexterous.flutterlocalnotifications.ForegroundService"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="dataSync" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

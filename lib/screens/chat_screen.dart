@@ -4,6 +4,7 @@ import '../providers/app_state.dart';
 import '../theme/app_theme.dart';
 import '../widgets/app_sidebar.dart';
 import '../widgets/chat_bubble.dart';
+import '../widgets/model_download_banner.dart';
 import '../widgets/scope_selector_dialog.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -150,6 +151,8 @@ class _ChatScreenState extends State<ChatScreen> {
       body: SafeArea(
         child: Column(
           children: [
+            const ModelDownloadBanner(),
+
             // Chat Content (Empty State or Messages List)
             Expanded(
               child: messages.isEmpty

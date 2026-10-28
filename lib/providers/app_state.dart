@@ -9,6 +9,9 @@ import '../services/answer_service.dart';
 import '../services/document_indexer.dart';
 import '../services/document_store.dart';
 import '../services/embedding_service.dart';
+import '../services/indexing_notifications.dart';
+import '../services/model_config.dart';
+import '../services/model_manager.dart';
 import '../services/retriever.dart';
 
 class AppState extends ChangeNotifier {
@@ -23,14 +26,25 @@ class AppState extends ChangeNotifier {
   DocumentStore? _store;
   DocumentIndexer? _indexer;
   Retriever? _retriever;
-  final EmbeddingService _embeddings = EmbeddingService();
+  final ModelManager models;
+  late final EmbeddingService _embeddings = EmbeddingService(models);
   final AnswerService _answers = AnswerService();
   late final Future<void> _storageReady;
   late final AppLifecycleListener _lifecycle;
 
-  AppState() {
+  final IndexingNotifications _notifications = IndexingNotifications();
+  int _indexingJobs = 0;
+  int _batchIndexed = 0;
+  int _batchFailed = 0;
+
+  static const _answerModelKey = 'answer_model';
+  ModelSpec? _answerModel;
+  bool _storageLoaded = false;
+
+  AppState(this.models) {
     createNewChat();
     _storageReady = _initStorage();
+    _notifications.init();
     // Free the ~3 GB answering model when the app goes to the background; it
     // reloads on the next question.
     _lifecycle = AppLifecycleListener(onPause: () {
@@ -58,7 +72,26 @@ class AppState extends ChangeNotifier {
     }
     // Keep the fresh "New chat" on top, followed by saved chats.
     _chatSessions.addAll(store.loadChats().where((c) => c.id != _activeChatId));
+    _answerModel = ModelConfig.answeringModelById(store.getSetting(_answerModelKey));
+    _storageLoaded = true;
     notifyListeners();
+  }
+
+  /// The answering model the user chose; null until they pick one.
+  ModelSpec? get answerModel => _answerModel;
+
+  /// True on first launch, before an answering model has been chosen.
+  bool get needsModelSetup => _storageLoaded && _answerModel == null;
+
+  /// Saves [model] as the answering model and starts its background
+  /// download if it is not on the phone yet.
+  Future<void> selectAnswerModel(ModelSpec model, {bool wifiOnly = false}) async {
+    await _storageReady;
+    _answerModel = model;
+    _store?.setSetting(_answerModelKey, model.id);
+    notifyListeners();
+    await models.download(model, wifiOnly: wifiOnly);
+    if (!_isGenerating) await _answers.unload();
   }
 
   @override
@@ -231,6 +264,10 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> _indexDocument(Document doc) async {
+    // Jobs run one at a time in the indexer; these count the current batch
+    // for the notification.
+    _indexingJobs++;
+    var succeeded = false;
     try {
       await _indexer!.index(
         docId: doc.id,
@@ -247,9 +284,11 @@ class AppState extends ChangeNotifier {
           if (!_documents.contains(doc)) return;
           doc.progress = progress;
           notifyListeners();
+          _notifications.progress(docName: doc.name, progress: progress, queued: _indexingJobs - 1);
         },
       );
       if (!_documents.contains(doc)) return;
+      succeeded = true;
       doc.status = DocumentStatus.ready;
       doc.progress = 1.0;
       doc.errorMessage = null;
@@ -257,6 +296,18 @@ class AppState extends ChangeNotifier {
     } catch (e) {
       debugPrint('Indexing ${doc.name} failed: $e');
       _markFailed(doc, e is IndexingException ? e.message : "Couldn't index this file");
+    } finally {
+      _indexingJobs--;
+      if (succeeded) {
+        _batchIndexed++;
+      } else if (_documents.contains(doc)) {
+        _batchFailed++;
+      }
+      if (_indexingJobs == 0) {
+        _notifications.finished(ready: _batchIndexed, failed: _batchFailed);
+        _batchIndexed = 0;
+        _batchFailed = 0;
+      }
     }
   }
 
@@ -385,24 +436,28 @@ class AppState extends ChangeNotifier {
                 'wait for it to finish indexing, then ask again.'
             : 'This document is not ready yet. Wait for indexing to finish, '
                 'or choose "All documents".';
+      } else if (_answerModel == null) {
+        reply.text = 'Choose an answering model first: open the menu, tap your '
+            'profile, then "Answering model".';
+      } else if (_modelNotReadyMessage(ModelConfig.embedding) case final message?) {
+        reply.text = message;
+      } else if (_modelNotReadyMessage(_answerModel!) case final message?) {
+        reply.text = message;
       } else {
+        final model = _answerModel!;
         status('Searching your documents…');
         final hits = await _retriever!.retrieve(question, docId: docId);
         if (hits.isEmpty) {
           reply.text = AnswerService.notFoundReply;
         } else {
-          if (!_answers.isLoaded) {
-            status('Loading the answering model…');
-            await _answers.warmUp(onDownloadProgress: (f) {
-              status(f == null
-                  ? 'Downloading Qwen3-4B (first run, ~2.5 GB)…'
-                  : 'Downloading Qwen3-4B (first run): ${(f * 100).toStringAsFixed(0)}%');
-            });
+          if (!_answers.isLoaded(model)) {
+            status('Loading ${model.displayName}…');
+            await _answers.load(model);
           }
           status('Reading ${hits.length} passages…');
           final docNames = {for (final d in _documents) d.id: d.name};
           final passages = AnswerService.toPassages(hits, docNames);
-          await for (final delta in _answers.answer(question, passages)) {
+          await for (final delta in _answers.answer(model, question, passages)) {
             pending.write(delta);
             flushTimer ??= Timer(const Duration(milliseconds: 50), flush);
           }
@@ -424,6 +479,27 @@ class AppState extends ChangeNotifier {
       _isGenerating = false;
       if (chat.messages.contains(reply)) _store?.saveMessage(chat, reply);
       notifyListeners();
+    }
+  }
+
+  /// Why [model] cannot be used yet, or null when it is downloaded. Starts the
+  /// download again if it is missing or failed.
+  String? _modelNotReadyMessage(ModelSpec model) {
+    final state = models.stateOf(model);
+    switch (state.status) {
+      case ModelStatus.ready:
+        return null;
+      case ModelStatus.downloading || ModelStatus.paused:
+        return '${model.displayName} is still downloading '
+            '(${(state.progress * 100).toStringAsFixed(0)}%). '
+            'Ask again once the download finishes.';
+      case ModelStatus.verifying:
+        return '${model.displayName} has downloaded and is being checked. '
+            'Ask again in a moment.';
+      case ModelStatus.notDownloaded || ModelStatus.failed:
+        unawaited(models.download(model));
+        return '${model.displayName} is not on this phone yet. The download '
+            'has started (${model.sizeLabel}); ask again once it finishes.';
     }
   }
 

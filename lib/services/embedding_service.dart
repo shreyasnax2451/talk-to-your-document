@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:llamadart/llamadart.dart';
 
 import 'model_config.dart';
+import 'model_manager.dart';
 
 /// Owns the EmbeddingGemma engine. The model is loaded on first use and kept
 /// for later indexing jobs and query embedding.
@@ -12,20 +13,22 @@ import 'model_config.dart';
 /// `task: search result | query: <question>`. Both sides must use the same
 /// model, so vectors stay comparable.
 class EmbeddingService {
+  final ModelManager models;
   LlamaEngine? _engine;
   Future<LlamaEngine>? _loading;
 
-  Future<LlamaEngine> _ensureLoaded({void Function(double? fraction)? onDownloadProgress}) {
+  EmbeddingService(this.models);
+
+  Future<LlamaEngine> _ensureLoaded({void Function(double progress)? onDownloadProgress}) {
     if (_engine != null) return Future.value(_engine);
     return _loading ??= () async {
       try {
+        // Waits for the background download if it has not finished yet.
+        await models.waitUntilReady(ModelConfig.embedding, onProgress: onDownloadProgress);
         final source = await ModelConfig.embedding.resolveSource();
         final engine = await LlamaEngine.load(
           LlamaModel(source),
-          params: ModelConfig.embeddingParams,
-          onProgress: onDownloadProgress == null
-              ? null
-              : (progress) => onDownloadProgress(progress.fraction),
+          params: ModelConfig.embedding.params,
         );
         _engine = engine;
         return engine;
@@ -35,7 +38,7 @@ class EmbeddingService {
     }();
   }
 
-  Future<void> warmUp({void Function(double? fraction)? onDownloadProgress}) =>
+  Future<void> warmUp({void Function(double progress)? onDownloadProgress}) =>
       _ensureLoaded(onDownloadProgress: onDownloadProgress);
 
   static String documentInput(String text, {String? title}) =>

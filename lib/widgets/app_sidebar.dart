@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/chat_session.dart';
 import '../providers/app_state.dart';
+import '../screens/model_setup_screen.dart';
 import '../theme/app_theme.dart';
 
 class AppSidebar extends StatelessWidget {
@@ -203,6 +204,23 @@ class AppSidebar extends StatelessWidget {
               ),
               const SizedBox(height: 16),
               const Divider(color: AppTheme.borderSubtle),
+              ListTile(
+                leading: const Icon(Icons.memory_rounded, color: AppTheme.textPrimary),
+                title: const Text(
+                  'Answering model',
+                  style: TextStyle(color: AppTheme.textPrimary),
+                ),
+                subtitle: Text(
+                  context.read<AppState>().answerModel?.displayName ?? 'Not chosen',
+                  style: const TextStyle(color: AppTheme.textMuted, fontSize: 12),
+                ),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const ModelSetupScreen()),
+                  );
+                },
+              ),
               ListTile(
                 leading: const Icon(Icons.logout_rounded, color: AppTheme.textPrimary),
                 title: const Text(

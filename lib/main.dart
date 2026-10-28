@@ -3,9 +3,11 @@ import 'package:flutter/services.dart';
 import 'package:pdfrx/pdfrx.dart';
 import 'package:provider/provider.dart';
 import 'providers/app_state.dart';
+import 'services/model_manager.dart';
 import 'theme/app_theme.dart';
 import 'screens/chat_screen.dart';
 import 'screens/library_screen.dart';
+import 'screens/model_setup_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -29,8 +31,12 @@ class DocChatApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ChangeNotifierProvider(
-      create: (_) => AppState(),
+    return MultiProvider(
+      providers: [
+        // Starts right away so the search model downloads on first launch.
+        ChangeNotifierProvider(create: (_) => ModelManager()..init(), lazy: false),
+        ChangeNotifierProvider(create: (context) => AppState(context.read<ModelManager>())),
+      ],
       child: MaterialApp(
         title: 'DocChat',
         debugShowCheckedModeBanner: false,
@@ -70,6 +76,10 @@ class _MainShellState extends State<MainShell> {
 
   @override
   Widget build(BuildContext context) {
+    // First launch: pick the answering model before anything else.
+    if (context.select<AppState, bool>((s) => s.needsModelSetup)) {
+      return const ModelSetupScreen(isFirstRun: true);
+    }
     return PopScope(
       canPop: _currentTabIndex == 0,
       onPopInvokedWithResult: (didPop, result) {

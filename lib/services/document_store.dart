@@ -112,6 +112,8 @@ class DocumentStore {
     ''');
     db.execute(
         'CREATE INDEX IF NOT EXISTS messages_chat_idx ON messages(chat_id, created_at)');
+    db.execute(
+        'CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
     return DocumentStore._(db);
   }
 
@@ -397,6 +399,18 @@ class DocumentStore {
   void deleteChat(String chatId) {
     _db.execute('DELETE FROM messages WHERE chat_id = ?', [chatId]);
     _db.execute('DELETE FROM chats WHERE id = ?', [chatId]);
+  }
+
+  String? getSetting(String key) {
+    final rows = _db.select('SELECT value FROM settings WHERE key = ?', [key]);
+    return rows.isEmpty ? null : rows.first['value'] as String;
+  }
+
+  void setSetting(String key, String value) {
+    _db.execute(
+        'INSERT INTO settings (key, value) VALUES (?, ?) '
+        'ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+        [key, value]);
   }
 
   int chunkCount(String docId) {

@@ -101,7 +101,7 @@ class DocumentIndexer {
   ) async {
     onProgress(0.02);
     await embeddings.warmUp(
-      onDownloadProgress: (f) => onProgress(0.02 + 0.08 * (f ?? 0)),
+      onDownloadProgress: (f) => onProgress(0.02 + 0.08 * f),
     );
 
     final pages = await extractPages(filePath);

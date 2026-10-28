@@ -12,10 +12,12 @@ class ContextPassage {
   const ContextPassage({required this.docName, required this.page, required this.text});
 }
 
-/// Owns the Qwen3-4B engine and writes answers grounded in retrieved
-/// passages. The model is loaded on the first question, not during indexing.
+/// Owns the answering model's engine (the model the user chose) and writes
+/// answers grounded in retrieved passages. The model is loaded on the first
+/// question, not during indexing, and swapped when the user picks another.
 class AnswerService {
   LlamaEngine? _engine;
+  ModelSpec? _loadedModel;
   Future<LlamaEngine>? _loading;
 
   static const notFoundReply = 'Not found in your documents.';
@@ -29,41 +31,42 @@ Rules:
 - Quote numbers, dates, amounts and names exactly as written in the passages.
 - Be concise: a short paragraph or a few bullet points.''';
 
-  bool get isLoaded => _engine != null;
+  bool isLoaded(ModelSpec model) => _engine != null && _loadedModel?.id == model.id;
 
-  Future<LlamaEngine> _ensureLoaded(void Function(double? fraction)? onDownloadProgress) {
-    if (_engine != null) return Future.value(_engine);
-    return _loading ??= () async {
-      try {
-        final source = await ModelConfig.answering.resolveSource();
-        final engine = await LlamaEngine.load(
-          LlamaModel(source),
-          params: ModelConfig.answeringParams,
-          onProgress: onDownloadProgress == null
-              ? null
-              : (progress) => onDownloadProgress(progress.fraction),
-        );
-        _engine = engine;
-        return engine;
-      } finally {
-        _loading = null;
-      }
+  Future<LlamaEngine> _ensureLoaded(ModelSpec model) async {
+    if (isLoaded(model)) return _engine!;
+    if (_loading != null) await _loading;
+    if (isLoaded(model)) return _engine!;
+    // One answering model in memory at a time.
+    await unload();
+    final loading = () async {
+      final engine = await LlamaEngine.load(
+        LlamaModel(await model.resolveSource()),
+        params: model.params,
+      );
+      _engine = engine;
+      _loadedModel = model;
+      return engine;
     }();
+    _loading = loading;
+    try {
+      return await loading;
+    } finally {
+      _loading = null;
+    }
   }
 
-  /// Loads the model if needed; [onDownloadProgress] reports the first-run
-  /// download (fraction is null while the size is unknown).
-  Future<void> warmUp({void Function(double? fraction)? onDownloadProgress}) =>
-      _ensureLoaded(onDownloadProgress);
+  /// Loads [model] (already downloaded) if it is not the one in memory.
+  Future<void> load(ModelSpec model) => _ensureLoaded(model);
 
   static List<ContextPassage> toPassages(List<ChunkHit> hits, Map<String, String> docNames) => [
         for (final hit in hits)
           ContextPassage(docName: docNames[hit.docId] ?? 'Document', page: hit.page, text: hit.text),
       ];
 
-  /// Streams the answer text for [question] from [passages].
-  Stream<String> answer(String question, List<ContextPassage> passages) async* {
-    final engine = await _ensureLoaded(null);
+  /// Streams [model]'s answer to [question] from [passages].
+  Stream<String> answer(ModelSpec model, String question, List<ContextPassage> passages) async* {
+    final engine = await _ensureLoaded(model);
     final context = StringBuffer();
     for (var i = 0; i < passages.length; i++) {
       final p = passages[i];
@@ -97,10 +100,12 @@ Rules:
 
   void stop() => _engine?.cancelGeneration();
 
-  /// Frees the ~3 GB the model holds; it reloads on the next question.
+  /// Frees the memory the model holds (1.5-3 GB); it reloads on the next
+  /// question.
   Future<void> unload() async {
     final engine = _engine;
     _engine = null;
+    _loadedModel = null;
     await engine?.dispose();
   }
 

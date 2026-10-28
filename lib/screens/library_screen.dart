@@ -4,6 +4,7 @@ import '../providers/app_state.dart';
 import '../theme/app_theme.dart';
 import '../widgets/document_card.dart';
 import '../widgets/app_sidebar.dart';
+import '../widgets/model_download_banner.dart';
 
 class LibraryScreen extends StatefulWidget {
   final VoidCallback onNavigateToChat;
@@ -61,6 +62,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
       ),
       body: Column(
         children: [
+          const ModelDownloadBanner(),
+
           // Search documents bar
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
