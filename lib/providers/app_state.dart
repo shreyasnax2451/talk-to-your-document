@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
 import 'package:file_picker/file_picker.dart';
@@ -9,7 +10,7 @@ import '../services/answer_service.dart';
 import '../services/document_indexer.dart';
 import '../services/document_store.dart';
 import '../services/embedding_service.dart';
-import '../services/indexing_notifications.dart';
+import '../services/background_notifications.dart';
 import '../services/model_config.dart';
 import '../services/model_manager.dart';
 import '../services/retriever.dart';
@@ -32,25 +33,48 @@ class AppState extends ChangeNotifier {
   late final Future<void> _storageReady;
   late final AppLifecycleListener _lifecycle;
 
-  final IndexingNotifications _notifications = IndexingNotifications();
+  final BackgroundNotifications _notifications = BackgroundNotifications();
   int _indexingJobs = 0;
   int _batchIndexed = 0;
   int _batchFailed = 0;
 
   static const _answerModelKey = 'answer_model';
+  static const _pendingModelKey = 'pending_answer_model';
+
+  /// The answering model in use: only set once its download is verified.
   ModelSpec? _answerModel;
+
+  /// A model the user chose that is still downloading; it replaces
+  /// [_answerModel] when ready.
+  ModelSpec? _pendingModel;
   bool _storageLoaded = false;
+
+  /// Set when iOS sends the app to the background mid-answer (see
+  /// [_onPause]).
+  bool _stoppedForBackground = false;
 
   AppState(this.models) {
     createNewChat();
     _storageReady = _initStorage();
     _notifications.init();
-    // Free the ~3 GB answering model when the app goes to the background; it
-    // reloads on the next question.
-    _lifecycle = AppLifecycleListener(onPause: () {
-      if (!_isGenerating) _answers.unload();
-    });
+    models.addListener(_onModelsChanged);
+    _lifecycle = AppLifecycleListener(onPause: _onPause);
   }
+
+  void _onPause() {
+    if (!_isGenerating) {
+      // Free the 1.5-3 GB answering model; it reloads on the next question.
+      _answers.unload();
+    } else if (Platform.isIOS) {
+      // iOS forbids GPU work in the background and suspends the app within
+      // seconds, so stop cleanly and keep the partial answer.
+      _stoppedForBackground = true;
+      _answers.stop();
+    }
+  }
+
+  static bool get _inForeground =>
+      WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed;
 
   Future<void> _initStorage() async {
     final DocumentStore store;
@@ -73,29 +97,61 @@ class AppState extends ChangeNotifier {
     // Keep the fresh "New chat" on top, followed by saved chats.
     _chatSessions.addAll(store.loadChats().where((c) => c.id != _activeChatId));
     _answerModel = ModelConfig.answeringModelById(store.getSetting(_answerModelKey));
+    _pendingModel = ModelConfig.answeringModelById(store.getSetting(_pendingModelKey));
     _storageLoaded = true;
+    _onModelsChanged();
     notifyListeners();
   }
 
-  /// The answering model the user chose; null until they pick one.
+  /// The answering model in use; null until the first download finishes.
   ModelSpec? get answerModel => _answerModel;
 
-  /// True on first launch, before an answering model has been chosen.
-  bool get needsModelSetup => _storageLoaded && _answerModel == null;
+  /// The chosen model that is still downloading, if any.
+  ModelSpec? get pendingModel => _pendingModel;
 
-  /// Saves [model] as the answering model and starts its background
-  /// download if it is not on the phone yet.
+  /// True until an answering model and the resources pack are both on the
+  /// phone; the app shows the download screen until then.
+  bool get needsModelSetup =>
+      _storageLoaded && (_answerModel == null || !models.isReady(ModelConfig.embedding));
+
+  /// Chooses [model] as the answering model. A downloaded model is used
+  /// immediately; otherwise it downloads in the background and takes over
+  /// when ready, while the current model stays in use.
   Future<void> selectAnswerModel(ModelSpec model, {bool wifiOnly = false}) async {
     await _storageReady;
-    _answerModel = model;
-    _store?.setSetting(_answerModelKey, model.id);
+    if (models.isReady(model)) {
+      _activate(model);
+      return;
+    }
+    _pendingModel = model;
+    _store?.setSetting(_pendingModelKey, model.id);
     notifyListeners();
     await models.download(model, wifiOnly: wifiOnly);
-    if (!_isGenerating) await _answers.unload();
+  }
+
+  void _activate(ModelSpec model) {
+    _answerModel = model;
+    _pendingModel = null;
+    _store?.setSetting(_answerModelKey, model.id);
+    _store?.setSetting(_pendingModelKey, '');
+    if (!_isGenerating) _answers.unload();
+    notifyListeners();
+  }
+
+  /// Switches to the pending model once its download is verified, and
+  /// re-checks the setup gate as downloads progress.
+  void _onModelsChanged() {
+    final pending = _pendingModel;
+    if (pending != null && models.isReady(pending)) {
+      _activate(pending);
+    } else {
+      notifyListeners();
+    }
   }
 
   @override
   void dispose() {
+    models.removeListener(_onModelsChanged);
     _lifecycle.dispose();
     _answers.dispose();
     _embeddings.dispose();
@@ -284,7 +340,7 @@ class AppState extends ChangeNotifier {
           if (!_documents.contains(doc)) return;
           doc.progress = progress;
           notifyListeners();
-          _notifications.progress(docName: doc.name, progress: progress, queued: _indexingJobs - 1);
+          _notifications.indexingProgress(docName: doc.name, progress: progress, queued: _indexingJobs - 1);
         },
       );
       if (!_documents.contains(doc)) return;
@@ -304,7 +360,7 @@ class AppState extends ChangeNotifier {
         _batchFailed++;
       }
       if (_indexingJobs == 0) {
-        _notifications.finished(ready: _batchIndexed, failed: _batchFailed);
+        _notifications.indexingFinished(ready: _batchIndexed, failed: _batchFailed);
         _batchIndexed = 0;
         _batchFailed = 0;
       }
@@ -394,10 +450,13 @@ class AppState extends ChangeNotifier {
 
   void stopGeneration() => _answers.stop();
 
-  /// Retrieves passages for [question] and streams Qwen3-4B's answer into a
-  /// new assistant message on [chat].
+  /// Retrieves passages for [question] and streams the answering model's
+  /// reply into a new assistant message on [chat].
   Future<void> _answer(ChatSession chat, String question) async {
     _isGenerating = true;
+    _stoppedForBackground = false;
+    // Android: keeps the app alive if the user leaves while it answers.
+    _notifications.answeringStarted();
     final reply = ChatMessage(
       id: _uuid.v4(),
       text: '',
@@ -415,6 +474,7 @@ class AppState extends ChangeNotifier {
 
     final pending = StringBuffer();
     Timer? flushTimer;
+    var lastSaved = DateTime.now();
     void flush() {
       flushTimer = null;
       if (pending.isEmpty) return;
@@ -422,6 +482,13 @@ class AppState extends ChangeNotifier {
       reply.statusText = null;
       pending.clear();
       notifyListeners();
+      // Save the partial answer every few seconds, so it survives the app
+      // being killed in the background.
+      final now = DateTime.now();
+      if (now.difference(lastSaved).inSeconds >= 3 && chat.messages.contains(reply)) {
+        lastSaved = now;
+        _store?.saveMessage(chat, reply);
+      }
     }
 
     try {
@@ -470,15 +537,26 @@ class AppState extends ChangeNotifier {
       debugPrint('Answering failed: $e');
       flushTimer?.cancel();
       flush();
-      if (reply.text.isEmpty) reply.text = "Couldn't answer: $e";
+      if (reply.text.isEmpty && !_stoppedForBackground) reply.text = "Couldn't answer: $e";
     } finally {
       reply.text = reply.text.trim();
+      if (_stoppedForBackground) {
+        const note = 'Stopped because the app went to the background. Tap Regenerate to try again.';
+        reply.text = reply.text.isEmpty ? note : '${reply.text}\n\n($note)';
+      }
       if (reply.text.isEmpty) reply.text = 'Stopped.';
       reply.statusText = null;
       reply.isStreaming = false;
       _isGenerating = false;
       if (chat.messages.contains(reply)) _store?.saveMessage(chat, reply);
       notifyListeners();
+      final inBackground = !_inForeground;
+      _notifications.answeringFinished(
+        answer: _stoppedForBackground ? null : reply.text,
+        notify: inBackground,
+      );
+      // Nobody is looking: free the answering model's memory.
+      if (inBackground) _answers.unload();
     }
   }
 

@@ -7,7 +7,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 
 void main() {
-  testWidgets('lists both answering models with one Recommended badge', (tester) async {
+  testWidgets('shows user-facing model names, one Recommended badge and a Download button',
+      (tester) async {
     final models = ModelManager(); // not started: no platform channels in tests
     await tester.pumpWidget(MultiProvider(
       providers: [
@@ -21,15 +22,16 @@ void main() {
     ));
     await tester.pumpAndSettle();
 
-    expect(find.text('Qwen3-4B'), findsOneWidget);
-    expect(find.text('Qwen3-1.7B'), findsOneWidget);
+    expect(find.text('High accuracy'), findsOneWidget);
+    expect(find.text('Basic'), findsOneWidget);
+    expect(find.textContaining('Default resources pack'), findsOneWidget);
+    expect(find.textContaining('Qwen'), findsNothing);
+    expect(find.textContaining('EmbeddingGemma'), findsNothing);
     expect(find.text('Recommended'), findsOneWidget);
-    // RAM is unknown in tests, so the smaller model is recommended and
-    // pre-selected.
-    expect(find.textContaining('Download Qwen3-1.7B'), findsOneWidget);
 
-    await tester.tap(find.text('Qwen3-4B'));
-    await tester.pump();
-    expect(find.textContaining('Download Qwen3-4B (2.5 GB)'), findsOneWidget);
+    final button = find.widgetWithText(ElevatedButton, 'Download');
+    expect(button, findsOneWidget);
+    // A model is pre-selected and not downloading, so the button is enabled.
+    expect(tester.widget<ElevatedButton>(button).onPressed, isNotNull);
   });
 }

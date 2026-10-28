@@ -8,8 +8,11 @@ import '../theme/app_theme.dart';
 
 /// Lets the user pick the answering model. Shown on first launch and from the
 /// profile menu. The model recommended for this phone's RAM is pre-selected.
+///
+/// On first launch the app stays on this screen until the chosen model and
+/// the resources pack have both downloaded (see [AppState.needsModelSetup]).
 class ModelSetupScreen extends StatefulWidget {
-  /// First launch: no back button, and confirming continues into the app.
+  /// First launch: no back button, and the app opens once downloads finish.
   final bool isFirstRun;
 
   const ModelSetupScreen({super.key, this.isFirstRun = false});
@@ -27,7 +30,8 @@ class _ModelSetupScreenState extends State<ModelSetupScreen> {
   @override
   void initState() {
     super.initState();
-    _selected = context.read<AppState>().answerModel;
+    final appState = context.read<AppState>();
+    _selected = appState.pendingModel ?? appState.answerModel;
     ModelConfig.deviceRamGb().then((ram) {
       if (!mounted) return;
       setState(() {
@@ -38,22 +42,28 @@ class _ModelSetupScreenState extends State<ModelSetupScreen> {
     });
   }
 
-  Future<void> _confirm() async {
+  Future<void> _download() async {
     final model = _selected;
     if (model == null) return;
     final appState = context.read<AppState>();
-    final navigator = Navigator.of(context);
-    // Lets the download show progress in the notification shade (Android 13+).
+    // Lets downloads and indexing show progress in the notification shade.
     await FileDownloader().permissions.request(PermissionType.notifications);
     await appState.selectAnswerModel(model, wifiOnly: _wifiOnly);
-    if (!widget.isFirstRun && navigator.canPop()) navigator.pop();
   }
 
   @override
   Widget build(BuildContext context) {
     final models = context.watch<ModelManager>();
-    final current = context.watch<AppState>().answerModel;
+    final appState = context.watch<AppState>();
+    final current = appState.answerModel;
     final recommended = ModelConfig.recommendedFor(_ramGb);
+    final selectedState = _selected == null ? null : models.stateOf(_selected!);
+    final isDownloading = selectedState?.isActive ?? false;
+    // Nothing to do when the selected model is the one already in use.
+    final canPress = _selected != null && !isDownloading && _selected!.id != current?.id;
+    final waitingForPack = widget.isFirstRun &&
+        current != null &&
+        !models.isReady(ModelConfig.embedding);
 
     return Scaffold(
       appBar: AppBar(
@@ -71,10 +81,11 @@ class _ModelSetupScreenState extends State<ModelSetupScreen> {
                 Text(
                   widget.isFirstRun
                       ? 'Choose the model that writes answers from your PDFs. It is '
-                          'downloaded once and runs entirely on this phone. The download '
-                          'continues in the background, so you can start adding documents now.'
-                      : 'The model that writes answers from your PDFs. Switching downloads '
-                          'the new model in the background; your documents stay indexed.',
+                          'downloaded once and runs entirely on this phone. Downloads '
+                          'continue in the background, and DocChat opens once they finish.'
+                      : 'The model that writes answers from your PDFs. A new model '
+                          'downloads in the background; the current one stays in use until '
+                          'it finishes. Your documents stay indexed.',
                   style: const TextStyle(color: AppTheme.textSecondary, fontSize: 14, height: 1.45),
                 ),
                 const SizedBox(height: 8),
@@ -93,12 +104,12 @@ class _ModelSetupScreenState extends State<ModelSetupScreen> {
                     isSelected: model.id == _selected?.id,
                     isCurrent: model.id == current?.id,
                     onTap: () => setState(() => _selected = model),
-                    onDelete: () => models.delete(model),
+                    onDelete: model.id == appState.pendingModel?.id ? null : () => models.delete(model),
                     onRetry: () => models.download(model, wifiOnly: _wifiOnly),
                   ),
                   const SizedBox(height: 12),
                 ],
-                _SearchModelRow(state: models.stateOf(ModelConfig.embedding)),
+                _ResourcesPackRow(state: models.stateOf(ModelConfig.embedding)),
                 const SizedBox(height: 8),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
@@ -115,31 +126,41 @@ class _ModelSetupScreenState extends State<ModelSetupScreen> {
       bottomNavigationBar: SafeArea(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-          child: ElevatedButton(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppTheme.accent,
-              foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(vertical: 14),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-            ),
-            onPressed: _selected == null ? null : _confirm,
-            child: Text(
-              _confirmLabel(models),
-              style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-            ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (isDownloading || waitingForPack)
+                const Padding(
+                  padding: EdgeInsets.only(bottom: 8),
+                  child: Text(
+                    'Downloading… You can leave the app; downloads continue in the background.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: AppTheme.textMuted, fontSize: 12),
+                  ),
+                ),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppTheme.accent,
+                    foregroundColor: Colors.white,
+                    disabledBackgroundColor: AppTheme.surfaceHover,
+                    disabledForegroundColor: AppTheme.textMuted,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                  ),
+                  onPressed: canPress ? _download : null,
+                  child: const Text(
+                    'Download',
+                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
     );
-  }
-
-  String _confirmLabel(ModelManager models) {
-    final model = _selected;
-    if (model == null) return 'Continue';
-    final ready = models.isReady(model);
-    final action = ready ? 'Use' : 'Download';
-    final suffix = widget.isFirstRun ? ' and continue' : '';
-    return ready ? '$action ${model.displayName}$suffix' : '$action ${model.displayName} (${model.sizeLabel})$suffix';
   }
 }
 
@@ -150,7 +171,7 @@ class _ModelTile extends StatelessWidget {
   final bool isSelected;
   final bool isCurrent;
   final VoidCallback onTap;
-  final VoidCallback onDelete;
+  final VoidCallback? onDelete;
   final VoidCallback onRetry;
 
   const _ModelTile({
@@ -194,7 +215,7 @@ class _ModelTile extends StatelessWidget {
                     runSpacing: 4,
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      Text(model.displayName,
+                      Text(model.title,
                           style: const TextStyle(
                               color: AppTheme.textPrimary, fontSize: 16, fontWeight: FontWeight.w600)),
                       if (isRecommended)
@@ -292,12 +313,12 @@ class _StatusLine extends StatelessWidget {
   }
 }
 
-/// The search model is required and downloads automatically; shown for
-/// transparency about what is on the phone.
-class _SearchModelRow extends StatelessWidget {
+/// The resources pack (indexing and search) is required and downloads
+/// automatically at first launch; shown so users know what is on the phone.
+class _ResourcesPackRow extends StatelessWidget {
   final ModelState state;
 
-  const _SearchModelRow({required this.state});
+  const _ResourcesPackRow({required this.state});
 
   @override
   Widget build(BuildContext context) {
@@ -314,7 +335,7 @@ class _SearchModelRow extends StatelessWidget {
           Text('${model.displayName} · ${model.sizeLabel}',
               style: const TextStyle(color: AppTheme.textPrimary, fontSize: 14, fontWeight: FontWeight.w500)),
           const SizedBox(height: 4),
-          const Text('Required. Downloads automatically.',
+          const Text('Required for reading and searching your PDFs. Downloads automatically.',
               style: TextStyle(color: AppTheme.textMuted, fontSize: 12)),
           const SizedBox(height: 8),
           _StatusLine(state: state, onRetry: () => context.read<ModelManager>().download(model)),

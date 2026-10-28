@@ -8,7 +8,14 @@ import 'package:path_provider/path_provider.dart';
 /// A GGUF model file the app downloads once and runs on-device.
 class ModelSpec {
   final String id;
+
+  /// User-facing name used in sentences, banners and notifications. Model
+  /// names (Qwen, EmbeddingGemma) are not shown to users.
   final String displayName;
+
+  /// Short label for the model's card on the selection screen.
+  final String title;
+
   final String description;
   final String fileName;
   final String url;
@@ -23,6 +30,7 @@ class ModelSpec {
   const ModelSpec({
     required this.id,
     required this.displayName,
+    required this.title,
     required this.description,
     required this.fileName,
     required this.url,
@@ -76,7 +84,8 @@ class ModelConfig {
   /// Qwen3-4B at Q4_K_M: best on-phone accuracy, for 8 GB+ phones.
   static const qwen3_4b = ModelSpec(
     id: 'qwen3-4b-q4_k_m',
-    displayName: 'Qwen3-4B',
+    displayName: 'High accuracy model',
+    title: 'High accuracy',
     description: 'Best accuracy for multi-section and numeric questions. '
         'Needs about 3.4 GB of free RAM while answering.',
     fileName: 'Qwen3-4B-Q4_K_M.gguf',
@@ -91,7 +100,8 @@ class ModelConfig {
   /// the default for 6 GB phones.
   static const qwen3_1_7b = ModelSpec(
     id: 'qwen3-1.7b-q5_k_m',
-    displayName: 'Qwen3-1.7B',
+    displayName: 'Basic model',
+    title: 'Basic',
     description: 'Faster and smaller. Good for lookups; weaker on questions '
         'that span sections. Needs about 2 GB of free RAM while answering.',
     fileName: 'Qwen3-1.7B-Q5_K_M.gguf',
@@ -115,8 +125,10 @@ class ModelConfig {
   /// vector: all documents must be re-indexed.
   static const embedding = ModelSpec(
     id: 'embeddinggemma-300m-q8_0',
-    displayName: 'Search model (EmbeddingGemma)',
-    description: 'Indexes your PDFs and finds the passages that answer a question.',
+    displayName: 'Default resources pack',
+    title: 'Default resources pack',
+    description: 'Reads and indexes your PDFs and finds the passages that answer '
+        'a question. Required for every answering model.',
     fileName: 'embeddinggemma-300M-Q8_0.gguf',
     url: 'https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf',
     sizeBytes: 333590944,
