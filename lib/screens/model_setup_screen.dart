@@ -1,6 +1,7 @@
 import 'package:background_downloader/background_downloader.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+
 import '../providers/app_state.dart';
 import '../services/model_config.dart';
 import '../services/model_manager.dart';
@@ -57,13 +58,14 @@ class _ModelSetupScreenState extends State<ModelSetupScreen> {
     final appState = context.watch<AppState>();
     final current = appState.answerModel;
     final recommended = ModelConfig.recommendedFor(_ramGb);
-    final selectedState = _selected == null ? null : models.stateOf(_selected!);
-    final isDownloading = selectedState?.isActive ?? false;
+    // Once a download has started the choice is locked: the model being
+    // downloaded stays selected until it finishes or fails.
+    final downloading = ModelConfig.answeringModels.where((m) => models.stateOf(m).isActive).firstOrNull;
+    final selected = downloading ?? _selected;
+    final isDownloading = downloading != null;
     // Nothing to do when the selected model is the one already in use.
-    final canPress = _selected != null && !isDownloading && _selected!.id != current?.id;
-    final waitingForPack = widget.isFirstRun &&
-        current != null &&
-        !models.isReady(ModelConfig.embedding);
+    final canPress = selected != null && !isDownloading && selected.id != current?.id;
+    final waitingForPack = widget.isFirstRun && current != null && !models.isReady(ModelConfig.embedding);
 
     return Scaffold(
       appBar: AppBar(
@@ -81,11 +83,11 @@ class _ModelSetupScreenState extends State<ModelSetupScreen> {
                 Text(
                   widget.isFirstRun
                       ? 'Choose the model that writes answers from your PDFs. It is '
-                          'downloaded once and runs entirely on this phone. Downloads '
-                          'continue in the background, and DocChat opens once they finish.'
+                            'downloaded once and runs entirely on this phone. Downloads '
+                            'continue in the background, and DocChat opens once they finish.'
                       : 'The model that writes answers from your PDFs. A new model '
-                          'downloads in the background; the current one stays in use until '
-                          'it finishes. Your documents stay indexed.',
+                            'downloads in the background; the current one stays in use until '
+                            'it finishes. Your documents stay indexed.',
                   style: const TextStyle(color: AppTheme.textSecondary, fontSize: 14, height: 1.45),
                 ),
                 const SizedBox(height: 8),
@@ -101,9 +103,10 @@ class _ModelSetupScreenState extends State<ModelSetupScreen> {
                     model: model,
                     state: models.stateOf(model),
                     isRecommended: model.id == recommended.id,
-                    isSelected: model.id == _selected?.id,
+                    isSelected: model.id == selected?.id,
                     isCurrent: model.id == current?.id,
-                    onTap: () => setState(() => _selected = model),
+                    isLocked: isDownloading && model.id != downloading.id,
+                    onTap: isDownloading ? null : () => setState(() => _selected = model),
                     onDelete: model.id == appState.pendingModel?.id ? null : () => models.delete(model),
                     onRetry: () => models.download(model, wifiOnly: _wifiOnly),
                   ),
@@ -115,11 +118,15 @@ class _ModelSetupScreenState extends State<ModelSetupScreen> {
                   contentPadding: EdgeInsets.zero,
                   activeThumbColor: AppTheme.accent,
                   value: _wifiOnly,
-                  onChanged: (v) => setState(() => _wifiOnly = v),
-                  title: const Text('Download over Wi-Fi only',
-                      style: TextStyle(color: AppTheme.textPrimary, fontSize: 14)),
-                  subtitle: const Text('Recommended: models are 1-2.5 GB',
-                      style: TextStyle(color: AppTheme.textMuted, fontSize: 12)),
+                  onChanged: isDownloading ? null : (v) => setState(() => _wifiOnly = v),
+                  title: const Text(
+                    'Download over Wi-Fi only',
+                    style: TextStyle(color: AppTheme.textPrimary, fontSize: 14),
+                  ),
+                  subtitle: const Text(
+                    'Recommended: models are 1-2.5 GB',
+                    style: TextStyle(color: AppTheme.textMuted, fontSize: 12),
+                  ),
                 ),
               ],
             ),
@@ -150,10 +157,7 @@ class _ModelSetupScreenState extends State<ModelSetupScreen> {
                     shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                   ),
                   onPressed: canPress ? _download : null,
-                  child: const Text(
-                    'Download',
-                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-                  ),
+                  child: const Text('Download', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
                 ),
               ),
             ],
@@ -170,7 +174,10 @@ class _ModelTile extends StatelessWidget {
   final bool isRecommended;
   final bool isSelected;
   final bool isCurrent;
-  final VoidCallback onTap;
+
+  /// Another model is downloading: this card is dimmed and can't be chosen.
+  final bool isLocked;
+  final VoidCallback? onTap;
   final VoidCallback? onDelete;
   final VoidCallback onRetry;
 
@@ -180,6 +187,7 @@ class _ModelTile extends StatelessWidget {
     required this.isRecommended,
     required this.isSelected,
     required this.isCurrent,
+    required this.isLocked,
     required this.onTap,
     required this.onDelete,
     required this.onRetry,
@@ -187,56 +195,65 @@ class _ModelTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
-      borderRadius: BorderRadius.circular(14),
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: AppTheme.surface,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: isSelected ? AppTheme.accent : AppTheme.border, width: isSelected ? 1.5 : 1),
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(
-              isSelected ? Icons.radio_button_checked_rounded : Icons.radio_button_off_rounded,
-              color: isSelected ? AppTheme.accent : AppTheme.textMuted,
-              size: 22,
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 4,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      Text(model.title,
-                          style: const TextStyle(
-                              color: AppTheme.textPrimary, fontSize: 16, fontWeight: FontWeight.w600)),
-                      if (isRecommended)
-                        const _Badge('Recommended', AppTheme.accentLight, AppTheme.accentSubtle),
-                      if (isCurrent) const _Badge('In use', AppTheme.readyText, AppTheme.readyBg),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    '${model.sizeLabel} · for ${model.recommendedMinRamGb} GB+ RAM phones',
-                    style: const TextStyle(color: AppTheme.textMuted, fontSize: 12),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(model.description,
-                      style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13, height: 1.4)),
-                  const SizedBox(height: 8),
-                  _StatusLine(state: state, onDelete: isCurrent ? null : onDelete, onRetry: onRetry),
-                ],
+    return Opacity(
+      opacity: isLocked ? 0.45 : 1,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: AppTheme.surface,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: isSelected ? AppTheme.accent : AppTheme.border, width: isSelected ? 1.5 : 1),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(
+                isSelected ? Icons.radio_button_checked_rounded : Icons.radio_button_off_rounded,
+                color: isSelected ? AppTheme.accent : AppTheme.textMuted,
+                size: 22,
               ),
-            ),
-          ],
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Text(
+                          model.title,
+                          style: const TextStyle(
+                            color: AppTheme.textPrimary,
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        if (isRecommended) const _Badge('Recommended', AppTheme.accentLight, AppTheme.accentSubtle),
+                        if (isCurrent) const _Badge('In use', AppTheme.readyText, AppTheme.readyBg),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '${model.sizeLabel} · for ${model.recommendedMinRamGb} GB+ RAM phones',
+                      style: const TextStyle(color: AppTheme.textMuted, fontSize: 12),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      model.description,
+                      style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13, height: 1.4),
+                    ),
+                    const SizedBox(height: 8),
+                    _StatusLine(state: state, onDelete: isCurrent ? null : onDelete, onRetry: onRetry),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -288,7 +305,10 @@ class _StatusLine extends StatelessWidget {
               TextButton(
                 onPressed: onDelete,
                 style: TextButton.styleFrom(
-                    padding: EdgeInsets.zero, minimumSize: const Size(0, 28), foregroundColor: AppTheme.textSecondary),
+                  padding: EdgeInsets.zero,
+                  minimumSize: const Size(0, 28),
+                  foregroundColor: AppTheme.textSecondary,
+                ),
                 child: const Text('Delete', style: TextStyle(fontSize: 12)),
               ),
           ],
@@ -297,14 +317,19 @@ class _StatusLine extends StatelessWidget {
         return Row(
           children: [
             Expanded(
-              child: Text(state.error ?? 'Download failed',
-                  style: const TextStyle(color: AppTheme.failedText, fontSize: 12)),
+              child: Text(
+                state.error ?? 'Download failed',
+                style: const TextStyle(color: AppTheme.failedText, fontSize: 12),
+              ),
             ),
             if (onRetry != null)
               TextButton(
                 onPressed: onRetry,
                 style: TextButton.styleFrom(
-                    padding: EdgeInsets.zero, minimumSize: const Size(0, 28), foregroundColor: AppTheme.accent),
+                  padding: EdgeInsets.zero,
+                  minimumSize: const Size(0, 28),
+                  foregroundColor: AppTheme.accent,
+                ),
                 child: const Text('Retry', style: TextStyle(fontSize: 12)),
               ),
           ],
@@ -332,11 +357,15 @@ class _ResourcesPackRow extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('${model.displayName} · ${model.sizeLabel}',
-              style: const TextStyle(color: AppTheme.textPrimary, fontSize: 14, fontWeight: FontWeight.w500)),
+          Text(
+            '${model.displayName} · ${model.sizeLabel}',
+            style: const TextStyle(color: AppTheme.textPrimary, fontSize: 14, fontWeight: FontWeight.w500),
+          ),
           const SizedBox(height: 4),
-          const Text('Required for reading and searching your PDFs. Downloads automatically.',
-              style: TextStyle(color: AppTheme.textMuted, fontSize: 12)),
+          const Text(
+            'Required for reading and searching your PDFs. Downloads automatically.',
+            style: TextStyle(color: AppTheme.textMuted, fontSize: 12),
+          ),
           const SizedBox(height: 8),
           _StatusLine(state: state, onRetry: () => context.read<ModelManager>().download(model)),
         ],
@@ -357,7 +386,10 @@ class _Badge extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(8)),
-      child: Text(label, style: TextStyle(color: fg, fontSize: 11, fontWeight: FontWeight.w600)),
+      child: Text(
+        label,
+        style: TextStyle(color: fg, fontSize: 11, fontWeight: FontWeight.w600),
+      ),
     );
   }
 }
