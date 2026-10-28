@@ -13,6 +13,9 @@ import '../services/embedding_service.dart';
 import '../services/background_notifications.dart';
 import '../services/model_config.dart';
 import '../services/model_manager.dart';
+import '../services/context_builder.dart';
+import '../services/numeric_calculator.dart';
+import '../services/query_planner.dart';
 import '../services/retriever.dart';
 
 class AppState extends ChangeNotifier {
@@ -26,7 +29,7 @@ class AppState extends ChangeNotifier {
 
   DocumentStore? _store;
   DocumentIndexer? _indexer;
-  Retriever? _retriever;
+  ContextBuilder? _contexts;
   final ModelManager models;
   late final EmbeddingService _embeddings = EmbeddingService(models);
   final AnswerService _answers = AnswerService();
@@ -86,8 +89,18 @@ class AppState extends ChangeNotifier {
     }
     _store = store;
     _indexer = DocumentIndexer(store: store, embeddings: _embeddings);
-    _retriever = Retriever(store: store, embeddings: _embeddings);
+    _contexts = ContextBuilder(
+      store: store,
+      retriever: Retriever(store: store, embeddings: _embeddings),
+    );
     _documents = store.loadDocuments();
+    // Documents indexed before fact extraction existed (pattern matching only;
+    // quick).
+    try {
+      store.backfillFacts();
+    } catch (e) {
+      debugPrint('Fact backfill failed: $e');
+    }
     // A job still marked processing was cut off when the app last closed.
     for (final doc in _documents.where((d) => d.status == DocumentStatus.processing)) {
       doc.status = DocumentStatus.failed;
@@ -450,11 +463,28 @@ class AppState extends ChangeNotifier {
 
   void stopGeneration() => _answers.stop();
 
-  /// Retrieves passages for [question] and streams the answering model's
-  /// reply into a new assistant message on [chat].
+  /// The question and answer before the current (last) question in [chat],
+  /// used to resolve follow-ups like "and for Delhi?".
+  static ({String question, String answer})? _previousExchange(ChatSession chat) {
+    final messages = chat.messages;
+    final current = messages.lastIndexWhere((m) => m.isUser);
+    if (current <= 0) return null;
+    final previous = messages.lastIndexWhere((m) => m.isUser, current - 1);
+    if (previous < 0) return null;
+    final reply = messages
+        .skip(previous + 1)
+        .take(current - previous - 1)
+        .where((m) => !m.isUser)
+        .lastOrNull;
+    return (question: messages[previous].text, answer: reply?.text ?? '');
+  }
+
+  /// Plans how to answer [question], gathers passages for that plan and
+  /// writes the reply into a new assistant message on [chat].
   Future<void> _answer(ChatSession chat, String question) async {
     _isGenerating = true;
     _stoppedForBackground = false;
+    final previous = _previousExchange(chat);
     // Android: keeps the app alive if the user leaves while it answers.
     _notifications.answeringStarted();
     final reply = ChatMessage(
@@ -495,7 +525,14 @@ class AppState extends ChangeNotifier {
       await _storageReady;
       final store = _store;
       final docId = chat.scopeDocumentId;
-      if (store == null) {
+      final plan = QueryPlanner.plan(
+        question,
+        previousQuestion: previous?.question,
+        documents: docId == null ? (store?.readyDocuments() ?? const []) : const [],
+      );
+      if (plan.intent == QueryIntent.smallTalk) {
+        reply.text = QueryPlanner.smallTalkReply(question);
+      } else if (store == null) {
         reply.text = "Couldn't open the on-device database.";
       } else if (!store.hasReadyDocuments(docId: docId)) {
         reply.text = docId == null
@@ -512,8 +549,14 @@ class AppState extends ChangeNotifier {
         reply.text = message;
       } else {
         final model = _answerModel!;
-        status('Searching your documents…');
-        final hits = await _retriever!.retrieve(question, docId: docId);
+        status(switch (plan.intent) {
+          QueryIntent.documentSummary => 'Reading across the document…',
+          QueryIntent.list => 'Collecting every match…',
+          QueryIntent.compare => 'Looking up both sides…',
+          _ => 'Searching your documents…',
+        });
+        final context = await _contexts!.build(plan, scopeDocId: docId);
+        final hits = context.passages;
         if (hits.isEmpty) {
           reply.text = AnswerService.notFoundReply;
         } else {
@@ -521,16 +564,34 @@ class AppState extends ChangeNotifier {
             status('Loading ${model.displayName}…');
             await _answers.load(model);
           }
-          status('Reading ${hits.length} passages…');
           final docNames = {for (final d in _documents) d.id: d.name};
           final passages = AnswerService.toPassages(hits, docNames);
-          await for (final delta in _answers.answer(model, question, passages)) {
-            pending.write(delta);
-            flushTimer ??= Timer(const Duration(milliseconds: 50), flush);
+
+          // Numbers: the model extracts values, code does the arithmetic.
+          String? calculated;
+          if (plan.intent == QueryIntent.numeric) {
+            status('Finding the values…');
+            final values = await _answers.extractValues(model, plan, passages);
+            if (values != null) calculated = NumericCalculator.compute(plan.numericOp!, values);
           }
-          flushTimer?.cancel();
-          flush();
+
+          if (calculated != null) {
+            reply.text = calculated;
+          } else {
+            status('Reading ${hits.length} passages…');
+            await for (final delta in _answers.answer(model, plan, passages, previous: previous)) {
+              pending.write(delta);
+              flushTimer ??= Timer(const Duration(milliseconds: 50), flush);
+            }
+            flushTimer?.cancel();
+            flush();
+          }
           _applyCitations(reply, hits, docNames);
+          if (context.note case final note?) {
+            if (reply.text.trim() != AnswerService.notFoundReply) {
+              reply.text = '${reply.text.trim()}\n\n($note)';
+            }
+          }
         }
       }
     } catch (e) {

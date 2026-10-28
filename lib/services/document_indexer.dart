@@ -7,6 +7,7 @@ import 'package:pdfrx/pdfrx.dart';
 
 import 'document_store.dart';
 import 'embedding_service.dart';
+import 'fact_extractor.dart';
 import 'model_config.dart';
 import 'text_chunker.dart';
 
@@ -131,6 +132,7 @@ class DocumentIndexer {
       pages: pages,
       chunks: chunks,
       embeddings: vectors,
+      facts: FactExtractor.extract(chunks),
       embeddingModel: ModelConfig.embedding.id,
       embeddingDim: ModelConfig.embeddingDimensions,
     );

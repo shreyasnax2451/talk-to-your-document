@@ -8,7 +8,17 @@ import 'package:sqlite3/sqlite3.dart';
 import '../models/chat_message.dart';
 import '../models/chat_session.dart';
 import '../models/document.dart';
+import 'fact_extractor.dart';
 import 'text_chunker.dart';
+
+/// A stored [Fact] with the document and chunk it came from.
+class StoredFact {
+  final String docId;
+  final int chunkId;
+  final Fact fact;
+
+  const StoredFact({required this.docId, required this.chunkId, required this.fact});
+}
 
 /// A stored chunk returned by a search, with its search score.
 class ChunkHit {
@@ -114,6 +124,23 @@ class DocumentStore {
         'CREATE INDEX IF NOT EXISTS messages_chat_idx ON messages(chat_id, created_at)');
     db.execute(
         'CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+    // Amounts, dates, durations and IDs found at indexing time (see
+    // FactExtractor), for list and calculation questions.
+    db.execute('''
+      CREATE TABLE IF NOT EXISTS facts (
+        id INTEGER PRIMARY KEY,
+        doc_id TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+        chunk_index INTEGER NOT NULL,
+        page INTEGER NOT NULL,
+        kind TEXT NOT NULL,
+        raw TEXT NOT NULL,
+        number REAL,
+        unit TEXT,
+        date TEXT,
+        sentence TEXT NOT NULL
+      )
+    ''');
+    db.execute('CREATE INDEX IF NOT EXISTS facts_doc_idx ON facts(doc_id, kind)');
     return DocumentStore._(db);
   }
 
@@ -162,13 +189,14 @@ class DocumentStore {
     ]);
   }
 
-  /// Replaces the page texts and chunks of [docId] and marks it ready, in one
-  /// transaction.
+  /// Replaces the page texts, chunks and facts of [docId] and marks it ready,
+  /// in one transaction.
   void saveIndex({
     required String docId,
     required List<String> pages,
     required List<TextChunk> chunks,
     required List<Float32List> embeddings,
+    required List<Fact> facts,
     required String embeddingModel,
     required int embeddingDim,
   }) {
@@ -177,6 +205,7 @@ class DocumentStore {
     try {
       _db.execute('DELETE FROM pages WHERE doc_id = ?', [docId]);
       _db.execute('DELETE FROM chunks WHERE doc_id = ?', [docId]);
+      _insertFacts(docId, facts);
       final insertPage =
           _db.prepare('INSERT INTO pages (doc_id, page, text) VALUES (?, ?, ?)');
       try {
@@ -225,6 +254,7 @@ class DocumentStore {
     _db.execute('BEGIN');
     try {
       _db.execute('DELETE FROM pages WHERE doc_id = ?', [docId]);
+      _db.execute('DELETE FROM facts WHERE doc_id = ?', [docId]);
       _db.execute('DELETE FROM chunks WHERE doc_id = ?', [docId]);
       _db.execute('DELETE FROM documents WHERE id = ?', [docId]);
       _db.execute('COMMIT');
@@ -316,13 +346,156 @@ class DocumentStore {
   /// Turns free text into an FTS5 query: each meaningful term quoted (so
   /// punctuation such as "EXP-12" is safe) and OR-ed, letting BM25 rank.
   static String? ftsQuery(String text) {
-    final terms = RegExp(r'[\p{L}\p{N}][\p{L}\p{N}\-_./]*', unicode: true)
-        .allMatches(text.toLowerCase())
-        .map((m) => m.group(0)!.replaceAll(RegExp(r'[.\-_/]+$'), ''))
-        .where((t) => t.length > 1 && !_stopWords.contains(t))
-        .toSet();
+    final terms = queryTerms(text);
     if (terms.isEmpty) return null;
     return terms.map((t) => '"$t"').join(' OR ');
+  }
+
+  /// The meaningful, lower-cased words of [text] (stop words removed).
+  static Set<String> queryTerms(String text) =>
+      RegExp(r'[\p{L}\p{N}][\p{L}\p{N}\-_./]*', unicode: true)
+          .allMatches(text.toLowerCase())
+          .map((m) => m.group(0)!.replaceAll(RegExp(r'[.\-_/]+$'), ''))
+          .where((t) => t.length > 1 && !_stopWords.contains(t))
+          .toSet();
+
+  /// The chunks within [radius] positions of [chunkId] in the same document,
+  /// in reading order: the section around a search hit.
+  List<ChunkHit> neighborChunks(int chunkId, {int radius = 2}) {
+    final anchor = _db.select('SELECT doc_id, chunk_index FROM chunks WHERE id = ?', [chunkId]);
+    if (anchor.isEmpty) return const [];
+    final docId = anchor.first['doc_id'] as String;
+    final index = anchor.first['chunk_index'] as int;
+    return [
+      for (final row in _db.select(
+          'SELECT id, page, text FROM chunks WHERE doc_id = ? AND chunk_index BETWEEN ? AND ? '
+          'ORDER BY chunk_index',
+          [docId, index - radius, index + radius]))
+        ChunkHit(
+          id: row['id'] as int,
+          docId: docId,
+          page: row['page'] as int,
+          text: row['text'] as String,
+          score: 0,
+        ),
+    ];
+  }
+
+  /// Evenly spaced chunks from across [docId] (first and last included):
+  /// a sample of the whole document, for summaries.
+  List<ChunkHit> sampleChunks(String docId, {required int count}) {
+    final rows = _db.select(
+        'SELECT id, page, text FROM chunks WHERE doc_id = ? ORDER BY chunk_index', [docId]);
+    if (rows.isEmpty || count <= 0) return const [];
+    final n = rows.length;
+    final picks = count >= n
+        ? List.generate(n, (i) => i)
+        : {for (var i = 0; i < count; i++) count == 1 ? 0 : (i * (n - 1) / (count - 1)).round()}
+            .toList();
+    return [
+      for (final i in picks)
+        ChunkHit(
+          id: rows[i]['id'] as int,
+          docId: docId,
+          page: rows[i]['page'] as int,
+          text: rows[i]['text'] as String,
+          score: 0,
+        ),
+    ];
+  }
+
+  /// Ready documents, newest first.
+  List<({String id, String name})> readyDocuments() => [
+        for (final row in _db.select(
+            "SELECT id, name FROM documents WHERE status = 'ready' ORDER BY uploaded_at DESC"))
+          (id: row['id'] as String, name: row['name'] as String),
+      ];
+
+  void _insertFacts(String docId, List<Fact> facts) {
+    _db.execute('DELETE FROM facts WHERE doc_id = ?', [docId]);
+    final insert = _db.prepare(
+        'INSERT INTO facts (doc_id, chunk_index, page, kind, raw, number, unit, date, sentence) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    try {
+      for (final f in facts) {
+        insert.execute([
+          docId,
+          f.chunkIndex,
+          f.page,
+          f.kind.name,
+          f.raw,
+          f.number,
+          f.unit,
+          f.date?.toIso8601String().substring(0, 10),
+          f.sentence,
+        ]);
+      }
+    } finally {
+      insert.close();
+    }
+  }
+
+  /// Facts of [kinds] in [docId] (all ready documents when null), in reading
+  /// order.
+  List<StoredFact> facts({required Set<FactKind> kinds, String? docId, int limit = 60}) {
+    if (kinds.isEmpty) return const [];
+    final kindList = kinds.map((k) => "'${k.name}'").join(',');
+    return [
+      for (final row in _db.select('''
+        SELECT f.doc_id, f.chunk_index, f.page, f.kind, f.raw, f.number, f.unit, f.date, f.sentence,
+               c.id AS chunk_id
+        FROM facts f
+        JOIN documents d ON d.id = f.doc_id
+        LEFT JOIN chunks c ON c.doc_id = f.doc_id AND c.chunk_index = f.chunk_index
+        WHERE d.status = 'ready' AND f.kind IN ($kindList) AND (? IS NULL OR f.doc_id = ?)
+        ORDER BY d.uploaded_at DESC, f.chunk_index, f.id
+        LIMIT ?
+      ''', [docId, docId, limit]))
+        StoredFact(
+          docId: row['doc_id'] as String,
+          chunkId: row['chunk_id'] as int? ?? -1,
+          fact: Fact(
+            kind: FactKind.values.byName(row['kind'] as String),
+            raw: row['raw'] as String,
+            number: (row['number'] as num?)?.toDouble(),
+            unit: row['unit'] as String?,
+            date: row['date'] == null ? null : DateTime.parse(row['date'] as String),
+            sentence: row['sentence'] as String,
+            page: row['page'] as int,
+            chunkIndex: row['chunk_index'] as int,
+          ),
+        ),
+    ];
+  }
+
+  /// Extracts facts for ready documents indexed before facts existed.
+  /// Pattern matching only, so it is quick even for large libraries.
+  void backfillFacts() {
+    final docs = _db.select('''
+      SELECT d.id FROM documents d
+      WHERE d.status = 'ready' AND NOT EXISTS (SELECT 1 FROM facts f WHERE f.doc_id = d.id)
+    ''');
+    for (final doc in docs) {
+      final docId = doc['id'] as String;
+      final chunks = [
+        for (final row in _db.select(
+            'SELECT chunk_index, page, text FROM chunks WHERE doc_id = ? ORDER BY chunk_index',
+            [docId]))
+          TextChunk(
+            pageNumber: row['page'] as int,
+            chunkIndex: row['chunk_index'] as int,
+            text: row['text'] as String,
+          ),
+      ];
+      _db.execute('BEGIN');
+      try {
+        _insertFacts(docId, FactExtractor.extract(chunks));
+        _db.execute('COMMIT');
+      } catch (_) {
+        _db.execute('ROLLBACK');
+        rethrow;
+      }
+    }
   }
 
   Map<int, String> _chunkTexts(List<int> ids) {
