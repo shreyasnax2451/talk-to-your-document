@@ -98,6 +98,11 @@ class ModelManager extends ChangeNotifier {
       paused: const TaskNotification('Download paused', '{displayName}'),
       progressBar: true,
     );
+    // Android: run downloads as a foreground job. Otherwise WorkManager stops
+    // a job after ~9 minutes and the downloader pauses and resumes it; for a
+    // 2.5 GB model that cycle can end in a restart from 0%, which showed up as
+    // a notification jumping back and the app stuck at 100%.
+    await FileDownloader().configure(androidConfig: [(Config.runInForeground, Config.always)]);
     await FileDownloader().start();
 
     for (final model in ModelConfig.allModels) {
@@ -191,6 +196,9 @@ class ModelManager extends ChangeNotifier {
     }
   }
 
+  /// Progress drops smaller than this are treated as out-of-order reports.
+  static const _maxIgnoredDrop = 0.05;
+
   /// Applies a status or progress report from the downloader.
   @visibleForTesting
   void handleUpdate(TaskUpdate update) {
@@ -199,13 +207,15 @@ class ModelManager extends ChangeNotifier {
     switch (update) {
       case TaskProgressUpdate(:final progress):
         if (progress >= 0 && progress <= 1) {
-          // Progress shown for a running download never goes backwards. A
-          // lower value means a stale or duplicate report (or a restart the
-          // downloader handles itself); the bar holds until it catches up.
+          // Small drops are out-of-order reports and are ignored, so the bar
+          // doesn't flicker. A large drop is a real restart and is shown as
+          // it is: hiding it made the app sit at 100% while the download had
+          // actually started over.
           final current = stateOf(model);
-          final shown = current.isActive && progress < current.progress ? current.progress : progress;
-          if (shown != progress) {
-            debugPrint('${model.id}: ignoring lower progress $progress (showing ${current.progress})');
+          final drop = current.progress - progress;
+          final shown = current.isActive && drop > 0 && drop < _maxIgnoredDrop ? current.progress : progress;
+          if (current.isActive && drop >= _maxIgnoredDrop) {
+            debugPrint('${model.id}: download restarted (${current.progress} -> $progress)');
           }
           _set(model, ModelState(ModelStatus.downloading, progress: shown));
         }

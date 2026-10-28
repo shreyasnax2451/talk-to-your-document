@@ -15,13 +15,20 @@ void main() {
   const pack = ModelConfig.embedding;
   const model = ModelConfig.qwen3_4b;
 
-  test('progress for a running download never goes backwards', () {
+  test('small out-of-order drops are ignored', () {
     final models = ModelManager();
     progress(models, model, 0.9);
-    progress(models, model, 0.25); // stale or duplicate report
+    progress(models, model, 0.88); // late report
     expect(models.stateOf(model).progress, 0.9);
     progress(models, model, 0.95);
     expect(models.stateOf(model).progress, 0.95);
+  });
+
+  test('a real restart is shown, not hidden at the old value', () {
+    final models = ModelManager();
+    progress(models, model, 0.99);
+    progress(models, model, 0.25); // the download started over
+    expect(models.stateOf(model).progress, 0.25);
   });
 
   test('a fresh download after a failure starts again from zero', () {

@@ -6,8 +6,8 @@ is the architecture guide *On-Device PDF Q&A App — SLM Architecture Guide*
 (Oct 2026); this file records what was actually built, what was decided and
 why, and what is still open.
 
-Companion document: `docs/DocChat-Approach-and-Limitations.pdf` (the approach
-explained, plus the full list of limitations).
+Companion document: `docs/DocChat-Approach-and-Limitations.pdf` (features,
+the approach explained, and the full list of limitations).
 
 ## Goal and current scope
 
@@ -28,10 +28,46 @@ models download straight from Hugging Face.
 | `fa86e18` | User-facing model names, download-gated first launch, background-safe answering (Android foreground service, partial-answer saving, iOS clean stop) |
 | `8f127bc` | Query planner: intent per question, retrieval plan per intent, fact extraction, numeric calculation in code, evaluation test |
 | `0861b36` | Model selection locked while a model downloads; these docs |
-| (latest) | Per-chat context: scope locked once a chat has messages; topic memory for chains of follow-ups |
+| `881e65c` | Per-chat context (scope lock, topic memory for follow-up chains); no duplicate downloads; one combined banner percentage |
+| (next commit) | Android downloads run as a foreground job (fixes restarts from 0% / stuck at 100%); real restarts shown; Features section in the docs |
 
-Nothing is pushed. Nothing has been tested on a real phone yet (only on the
-Windows laptop through `flutter test`).
+Nothing is pushed. Verified on the Windows laptop (`flutter test` and the
+opt-in evaluation) and tested by hand by the user on one Android phone
+(downloads, setup, chat). Phone timings and memory use have not been
+measured; there is no iOS build.
+
+## Features
+
+What a user can do in the app today:
+
+- **Private by design**: PDFs, index, chats and models stay on the phone;
+  nothing about documents or questions is sent to a server. Works offline
+  once models are downloaded. No account needed yet.
+- **Setup and models**: first-launch screen to choose **High accuracy** or
+  **Basic**, with the one suiting the phone's RAM marked **Recommended** and
+  pre-selected; one Download button; the choice is locked while downloading;
+  the **Default resources pack** downloads automatically; the app opens once
+  both are verified. Change or delete models later from the profile menu
+  (the current model stays in use until the new one is ready).
+- **Downloads**: background downloads that survive closing the app and
+  network drops, progress notification plus one combined in-app banner,
+  Wi-Fi-only option, SHA-256 check of every file.
+- **Library**: upload PDFs; background indexing one at a time with progress
+  on the card and in a notification; retry failed documents; rename; delete
+  (removes all its data); document viewer with the extracted text.
+- **Chat**: plain-language questions; streaming answers with Stop; page
+  citations `[p. 3]` and source chips that open the document at that page;
+  copy and regenerate; "Not found in your documents." instead of guessing.
+- **Kinds of question**: facts, follow-ups, section and whole-document
+  summaries, lists, comparisons, exact calculations (totals, differences,
+  averages, days between dates); greetings answered instantly.
+- **Chats**: saved and listed under Recents; rename or delete; each chat is
+  about one document or all documents, fixed once it has messages
+  (choosing another starts a new chat); follow-ups remember the topic.
+- **In the background**: on Android, indexing and answering continue after
+  leaving the app (progress notification, then "Your document is ready" /
+  "Your answer is ready"); partial answers are saved. On iOS an answer stops
+  cleanly when backgrounded and can be regenerated.
 
 ## Stack
 
@@ -58,20 +94,27 @@ Windows laptop through `flutter test`).
   "High accuracy", "Basic", "Default resources pack".
 - Answering models: 4K context, q8_0 KV cache, Qwen3 thinking mode off.
 - Files live in `<app support>/models/`, verified against published SHA-256.
-- Download progress (`ModelManager`): never starts a second copy of a
-  download (checks the downloader's tasks first; resumes paused ones),
-  progress for a running download never goes backwards, and the top banner
-  shows one size-weighted figure for the whole batch instead of switching
-  between items (an earlier build showed e.g. 90% → 25% → 90%).
+- Download progress (`ModelManager`):
+  - Android downloads run as a foreground job (`Config.runInForeground`).
+    Without it WorkManager stops jobs after ~9 minutes and the pause/resume
+    cycle could restart a 2.5 GB download from 0% (seen on a phone: the
+    notification jumped back while the app sat at "Downloading · 100%").
+  - Never starts a second copy of a download (checks the downloader's tasks
+    first; resumes paused ones).
+  - Drops under 5 points are treated as out-of-order reports and smoothed;
+    larger drops are real restarts and are shown.
+  - The top banner shows one size-weighted figure for the whole batch
+    instead of switching between items.
 
 ## How it works (short)
 
 1. **First launch**: resources pack starts downloading immediately; setup
    screen lists the answering models with "Recommended" pre-selected and a
-   single **Download** button (disabled while downloading). The app stays on
-   this screen until the chosen model *and* the resources pack are verified.
-   Changing models later keeps the current one in use until the new one is
-   ready.
+   single **Download** button. Once a download starts the choice is locked
+   (other model, Wi-Fi switch and button disabled) until it finishes or
+   fails. The app stays on this screen until the chosen model *and* the
+   resources pack are verified. Changing models later keeps the current one
+   in use until the new one is ready.
 2. **Indexing** (on upload, queued one at a time): copy PDF into app storage
    → pdfrx text per page → page-scoped chunks (1,600 chars, 200 overlap,
    re-split if > 1,024 tokens) → EmbeddingGemma (`title: … | text: …`,
@@ -112,6 +155,15 @@ candidates each, merged with Reciprocal Rank Fusion (k = 60). **No reranker.**
    - The model sees the topic question and only the last exchange; there is
      no longer-term conversation summary.
 
+5. **Background work** (`BackgroundNotifications`): on Android one
+   foreground service covers indexing and answering, with a progress
+   notification ("Indexing X · 42%", "Writing an answer…"); "Your document is
+   ready" / "Your answer is ready" when finished while the app is away.
+   Partial answers are saved every 3 s; the answering model is unloaded when
+   the app is backgrounded (or when an answer finishes in the background).
+   iOS forbids background GPU work, so an answer stops cleanly with a note to
+   regenerate.
+
 ## Decisions and why
 
 - **No reranker.** MiniLM GGUFs on Hugging Face are broken (llama.cpp's BERT
@@ -148,7 +200,7 @@ candidates each, merged with Reciprocal Rank Fusion (k = 60). **No reranker.**
 
 ## Tests
 
-- `flutter test`: 55 unit tests (chunker, FTS query, fact extraction,
+- `flutter test`: 56 unit tests (chunker, FTS query, fact extraction,
   planner incl. follow-up chains, calculator, chat scope lock, model config,
   setup screen incl. download lock, download progress, smoke).
 - `test/eval/answer_eval_test.dart`: opt-in end-to-end evaluation (16 cases,
@@ -164,8 +216,9 @@ candidates each, merged with Reciprocal Rank Fusion (k = 60). **No reranker.**
 
 ## Open items
 
-See the limitations section of the PDF. Highest value next: test on a real
-phone; encryption at rest (SQLCipher + Keystore/Keychain); own model
-manifest/CDN; re-index on embedding-model change; OCR for scanned PDFs;
-table-aware extraction; a longer-term conversation summary if users need
-memory beyond the current topic.
+See the limitations section of the PDF. Highest value next: measure
+indexing/answer times and memory on a 6 GB and an 8 GB phone; an iOS build;
+encryption at rest (SQLCipher + Keystore/Keychain); own model manifest/CDN;
+re-index on embedding-model change; OCR for scanned PDFs; table-aware
+extraction; a longer-term conversation summary if users need memory beyond
+the current topic.
