@@ -55,20 +55,25 @@ class _LocalModels extends ModelManager {
 
 class _Case {
   final String question;
-  final String? previous;
+
+  /// Earlier questions in the chat, oldest first.
+  final List<String> history;
   final QueryIntent intent;
 
   /// Every one of these must appear in the answer (case-insensitive).
   final List<String> mustContain;
   final bool needsGuide;
 
-  const _Case(this.question, this.intent, this.mustContain, {this.previous, this.needsGuide = false});
+  const _Case(this.question, this.intent, this.mustContain, {this.history = const [], this.needsGuide = false});
 }
 
 const _cases = [
   _Case('How many earned leave days can I carry forward?', QueryIntent.lookup, ['10']),
   _Case('and in other cities?', QueryIntent.lookup, ['5,000'],
-      previous: 'What is the hotel cap per night in metro cities?'),
+      history: ['What is the hotel cap per night in metro cities?']),
+  // Two follow-ups deep: still about hotel caps; Pune is not a listed metro.
+  _Case('what about Pune?', QueryIntent.lookup, ['5,000'],
+      history: ['What is the hotel cap per night in metro cities?', 'and in other cities?']),
   _Case('What is the notice period after probation?', QueryIntent.lookup, ['60 days']),
   _Case('Summarize the leave policy', QueryIntent.sectionSummary, ['18', '10']),
   _Case('Summarize this document', QueryIntent.documentSummary, ['Larkspur']),
@@ -129,7 +134,9 @@ void main() {
     for (final c in _cases) {
       if (c.needsGuide && !guide.existsSync()) continue;
       final clock = Stopwatch()..start();
-      final plan = QueryPlanner.plan(c.question, previousQuestion: c.previous, documents: store.readyDocuments());
+      final chat = QueryPlanner.contextOf(c.history);
+      final plan = QueryPlanner.plan(c.question,
+          previousQuestion: chat.previous, topicQuestion: chat.topic, documents: store.readyDocuments());
       var answer = '';
       if (plan.intent == QueryIntent.smallTalk) {
         answer = QueryPlanner.smallTalkReply(c.question);
@@ -146,7 +153,8 @@ void main() {
           if (answer.isEmpty) {
             answer = await answers
                 .answer(model, plan, passages,
-                    previous: c.previous == null ? null : (question: c.previous!, answer: ''))
+                    previous: chat.previous == null ? null : (question: chat.previous!, answer: ''),
+                    topic: chat.topic)
                 .join();
           }
         }

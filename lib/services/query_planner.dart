@@ -79,9 +79,14 @@ class QueryPlan {
 class QueryPlanner {
   QueryPlanner._();
 
+  /// [previousQuestion] is the chat's last question (small talk excluded);
+  /// [topicQuestion] is the question that started the chat's current topic
+  /// (see [contextOf]). Follow-ups are searched together with the topic, so a
+  /// chain of follow-ups stays on it.
   static QueryPlan plan(
     String question, {
     String? previousQuestion,
+    String? topicQuestion,
     List<({String id, String name})> documents = const [],
   }) {
     final q = question.trim();
@@ -94,10 +99,12 @@ class QueryPlanner {
     final namedDocId = _namedDocument(lower, documents);
     final factKinds = _factKinds(lower);
 
-    // Follow-ups continue the previous question: search with both, so
-    // "and in other cities?" finds what "hotel cap in metro cities" found.
+    // Follow-ups continue the current topic: search with both, so "and in
+    // other cities?" finds what "hotel cap in metro cities" found, and so
+    // does a later "what about Pune?".
     final followUp = previousQuestion != null && _isFollowUp(lower);
-    final searchBase = followUp ? '${previousQuestion.trim()} $q' : q;
+    final topic = (topicQuestion ?? previousQuestion)?.trim();
+    final searchBase = followUp ? '$topic $q' : q;
 
     if (_documentSummary.hasMatch(lower)) {
       return QueryPlan(
@@ -124,7 +131,7 @@ class QueryPlanner {
         return QueryPlan(
           intent: QueryIntent.sectionSummary,
           question: q,
-          searchQuery: followUp ? '${previousQuestion.trim()} $topic' : topic,
+          searchQuery: followUp ? '${(topicQuestion ?? previousQuestion).trim()} $topic' : topic,
           namedDocId: namedDocId,
           isFollowUp: followUp,
         );
@@ -177,6 +184,22 @@ class QueryPlanner {
       namedDocId: namedDocId,
       isFollowUp: followUp,
     );
+  }
+
+  /// Replays a chat's earlier questions (oldest first) to find its context
+  /// for the next question: the last question that was not small talk, and
+  /// the question that started the current topic (the last one that was not
+  /// a follow-up). Deterministic, so nothing needs to be stored.
+  static ({String? previous, String? topic}) contextOf(List<String> earlierQuestions) {
+    String? previous;
+    String? topic;
+    for (final q in earlierQuestions) {
+      final plan = QueryPlanner.plan(q, previousQuestion: previous, topicQuestion: topic);
+      if (plan.intent == QueryIntent.smallTalk) continue;
+      if (!plan.isFollowUp) topic = q;
+      previous = q;
+    }
+    return (previous: previous, topic: topic);
   }
 
   /// Replies for [QueryIntent.smallTalk], with no model call.

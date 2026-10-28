@@ -272,11 +272,25 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  void setScope(String? docId) {
+  /// Whether the active chat's scope is fixed: once a chat has messages it
+  /// stays about one document (or all documents), so its answers and
+  /// follow-ups share one context.
+  bool get isScopeLocked => activeChat.messages.isNotEmpty;
+
+  /// Chooses what the chat is about. A chat that already has messages keeps
+  /// its scope; choosing a different one starts a new chat with it instead.
+  /// Returns true when a new chat was started.
+  bool changeScope(String? docId) {
+    if (docId == activeChat.scopeDocumentId) return false;
+    if (isScopeLocked) {
+      createNewChat(scopeDocumentId: docId);
+      return true;
+    }
     _scopeDocumentId = docId;
     activeChat.scopeDocumentId = docId;
     _persistChat(activeChat);
     notifyListeners();
+    return false;
   }
 
   /// Chats are stored once they have messages; empty "New chat"s are not.
@@ -463,20 +477,21 @@ class AppState extends ChangeNotifier {
 
   void stopGeneration() => _answers.stop();
 
-  /// The question and answer before the current (last) question in [chat],
-  /// used to resolve follow-ups like "and for Delhi?".
-  static ({String question, String answer})? _previousExchange(ChatSession chat) {
+  /// The chat's context for its current (last) question: the previous real
+  /// question with its answer (small talk skipped), and the question that
+  /// started the current topic. Used to resolve follow-ups like "and for
+  /// Delhi?", including chains of them.
+  static ({({String question, String answer})? previous, String? topic}) _chatContext(ChatSession chat) {
     final messages = chat.messages;
     final current = messages.lastIndexWhere((m) => m.isUser);
-    if (current <= 0) return null;
-    final previous = messages.lastIndexWhere((m) => m.isUser, current - 1);
-    if (previous < 0) return null;
-    final reply = messages
-        .skip(previous + 1)
-        .take(current - previous - 1)
-        .where((m) => !m.isUser)
-        .lastOrNull;
-    return (question: messages[previous].text, answer: reply?.text ?? '');
+    if (current <= 0) return (previous: null, topic: null);
+    final earlier = [for (final m in messages.take(current)) if (m.isUser) m.text];
+    final context = QueryPlanner.contextOf(earlier);
+    final previousQuestion = context.previous;
+    if (previousQuestion == null) return (previous: null, topic: null);
+    final index = messages.take(current).toList().lastIndexWhere((m) => m.isUser && m.text == previousQuestion);
+    final reply = messages.skip(index + 1).take(current - index - 1).where((m) => !m.isUser).lastOrNull;
+    return (previous: (question: previousQuestion, answer: reply?.text ?? ''), topic: context.topic);
   }
 
   /// Plans how to answer [question], gathers passages for that plan and
@@ -484,7 +499,8 @@ class AppState extends ChangeNotifier {
   Future<void> _answer(ChatSession chat, String question) async {
     _isGenerating = true;
     _stoppedForBackground = false;
-    final previous = _previousExchange(chat);
+    final chatContext = _chatContext(chat);
+    final previous = chatContext.previous;
     // Android: keeps the app alive if the user leaves while it answers.
     _notifications.answeringStarted();
     final reply = ChatMessage(
@@ -528,6 +544,7 @@ class AppState extends ChangeNotifier {
       final plan = QueryPlanner.plan(
         question,
         previousQuestion: previous?.question,
+        topicQuestion: chatContext.topic,
         documents: docId == null ? (store?.readyDocuments() ?? const []) : const [],
       );
       if (plan.intent == QueryIntent.smallTalk) {
@@ -579,7 +596,8 @@ class AppState extends ChangeNotifier {
             reply.text = calculated;
           } else {
             status('Reading ${hits.length} passages…');
-            await for (final delta in _answers.answer(model, plan, passages, previous: previous)) {
+            await for (final delta in _answers.answer(model, plan, passages,
+                previous: previous, topic: chatContext.topic)) {
               pending.write(delta);
               flushTimer ??= Timer(const Duration(milliseconds: 50), flush);
             }

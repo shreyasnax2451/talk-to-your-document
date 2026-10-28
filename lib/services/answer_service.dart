@@ -167,12 +167,14 @@ $_groundingRules
       ];
 
   /// Streams [model]'s written answer for [plan] from [passages].
-  /// [previous] is the last question and answer, passed for follow-ups.
+  /// For follow-ups, [previous] (the last question and answer) and [topic]
+  /// (the question that started the current topic) give the model context.
   Stream<String> answer(
     ModelSpec model,
     QueryPlan plan,
     List<ContextPassage> passages, {
     ({String question, String answer})? previous,
+    String? topic,
   }) {
     final docNames = {for (final p in passages) p.docName}.toList();
     final documents = docNames.length;
@@ -194,8 +196,9 @@ $_groundingRules
       QueryIntent.compare => 'Request: ${plan.question}\nSides: ${plan.compareSides.join(' | ')}',
       _ => 'Question: ${plan.question}',
     };
+    final topicLine = topic != null && topic != previous?.question ? 'Conversation topic: $topic\n' : '';
     final history = plan.isFollowUp && previous != null
-        ? 'Earlier in this conversation (for context only):\n'
+        ? 'Earlier in this conversation (for context only):\n$topicLine'
             'Q: ${previous.question}\nA: ${_short(previous.answer, 400)}\n\n'
         : '';
     return _generate(

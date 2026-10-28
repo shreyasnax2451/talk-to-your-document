@@ -113,6 +113,41 @@ void main() {
     }
   });
 
+  test('a chain of follow-ups stays on the topic that started it', () {
+    final history = [
+      'What is the hotel cap in metro cities?',
+      'and in other cities?',
+      'thanks', // small talk is skipped
+    ];
+    final context = QueryPlanner.contextOf(history);
+    expect(context.previous, 'and in other cities?');
+    expect(context.topic, 'What is the hotel cap in metro cities?');
+
+    final p = QueryPlanner.plan('what about Pune?',
+        previousQuestion: context.previous, topicQuestion: context.topic, documents: docs);
+    expect(p.isFollowUp, isTrue);
+    expect(p.searchQuery, 'What is the hotel cap in metro cities? what about Pune?');
+  });
+
+  test('a new self-contained question starts a new topic', () {
+    final context = QueryPlanner.contextOf([
+      'What is the hotel cap in metro cities?',
+      'and in other cities?',
+      'How many sick leave days do I get?',
+    ]);
+    expect(context.topic, 'How many sick leave days do I get?');
+    final p = QueryPlanner.plan('and is it paid?',
+        previousQuestion: context.previous, topicQuestion: context.topic, documents: docs);
+    expect(p.searchQuery, startsWith('How many sick leave days'));
+  });
+
+  test('no history means no follow-up', () {
+    final context = QueryPlanner.contextOf(['hi', 'thanks']);
+    expect(context.previous, isNull);
+    expect(context.topic, isNull);
+    expect(QueryPlanner.plan('and in Delhi?', documents: docs).isFollowUp, isFalse);
+  });
+
   test('a question naming one document narrows to it', () {
     expect(QueryPlanner.plan('When does the lease end?', documents: docs).namedDocId, 'lease');
     expect(QueryPlanner.plan('What is the leave policy in the handbook?', documents: docs).namedDocId, 'hb');

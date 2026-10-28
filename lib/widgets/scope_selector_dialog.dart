@@ -18,10 +18,30 @@ class ScopeSelectorDialog extends StatelessWidget {
     );
   }
 
+  /// Applies [docId]; in a chat that already has messages this starts a new
+  /// chat about it, which is confirmed with a short message.
+  static void _choose(BuildContext context, AppState appState, String? docId, String label) {
+    final messenger = ScaffoldMessenger.of(context);
+    Navigator.of(context).pop();
+    if (appState.changeScope(docId)) {
+      messenger.showSnackBar(
+        SnackBar(
+          backgroundColor: AppTheme.surface,
+          content: Text(
+            'Started a new chat about $label',
+            style: const TextStyle(color: AppTheme.textPrimary),
+          ),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final appState = context.watch<AppState>();
     final currentScopeId = appState.scopeDocumentId;
+    final locked = appState.isScopeLocked;
     final readyDocuments = appState.documents
         .where((d) => d.status == DocumentStatus.ready)
         .toList();
@@ -44,17 +64,26 @@ class ScopeSelectorDialog extends StatelessWidget {
                 ),
               ),
             ),
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 20.0, vertical: 4),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 4),
               child: Text(
-                'Select chat scope',
-                style: TextStyle(
+                locked ? 'Start a new chat about…' : 'Select chat scope',
+                style: const TextStyle(
                   fontSize: 16,
                   fontWeight: FontWeight.w600,
                   color: AppTheme.textPrimary,
                 ),
               ),
             ),
+            if (locked)
+              const Padding(
+                padding: EdgeInsets.fromLTRB(20, 2, 20, 0),
+                child: Text(
+                  'This chat stays about what it started with, so its answers and '
+                  'follow-ups share one context. Choosing something else starts a new chat.',
+                  style: TextStyle(fontSize: 12, color: AppTheme.textSecondary, height: 1.4),
+                ),
+              ),
             const SizedBox(height: 8),
             ListTile(
               leading: Container(
@@ -91,10 +120,7 @@ class ScopeSelectorDialog extends StatelessWidget {
               trailing: currentScopeId == null
                   ? const Icon(Icons.check_rounded, color: AppTheme.accent)
                   : null,
-              onTap: () {
-                appState.setScope(null);
-                Navigator.of(context).pop();
-              },
+              onTap: () => _choose(context, appState, null, 'all documents'),
             ),
             const Divider(color: AppTheme.borderSubtle, height: 16),
             ...readyDocuments.map((doc) {
@@ -134,10 +160,7 @@ class ScopeSelectorDialog extends StatelessWidget {
                 trailing: isSelected
                     ? const Icon(Icons.check_rounded, color: AppTheme.accent)
                     : null,
-                onTap: () {
-                  appState.setScope(doc.id);
-                  Navigator.of(context).pop();
-                },
+                onTap: () => _choose(context, appState, doc.id, doc.name),
               );
             }),
           ],

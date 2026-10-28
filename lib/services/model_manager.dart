@@ -47,6 +47,30 @@ class ModelManager extends ChangeNotifier {
   List<ModelSpec> get activeDownloads =>
       [for (final m in ModelConfig.allModels) if (stateOf(m).isActive) m];
 
+  /// Models in the current batch of downloads: everything that has been
+  /// active since downloads last went idle, including ones already finished,
+  /// so overall progress never jumps back when one item completes.
+  final Set<String> _batch = {};
+
+  List<ModelSpec> get downloadBatch => [for (final m in ModelConfig.allModels) if (_batch.contains(m.id)) m];
+
+  /// Progress of the whole batch, weighted by file size (0..1).
+  double get batchProgress {
+    var total = 0.0;
+    var done = 0.0;
+    for (final m in downloadBatch) {
+      final s = stateOf(m);
+      total += m.sizeBytes;
+      done += m.sizeBytes *
+          switch (s.status) {
+            ModelStatus.ready || ModelStatus.verifying => 1.0,
+            ModelStatus.downloading || ModelStatus.paused => s.progress,
+            ModelStatus.notDownloaded || ModelStatus.failed => 0.0,
+          };
+    }
+    return total == 0 ? 0 : done / total;
+  }
+
   Future<void> init() async {
     if (_initialized) return;
     _initialized = true;
@@ -66,7 +90,7 @@ class ModelManager extends ChangeNotifier {
 
     // The listener must be registered before start(), which replays updates
     // for transfers that finished while the app was not running.
-    _updates = FileDownloader().updates.listen(_onUpdate);
+    _updates = FileDownloader().updates.listen(handleUpdate);
     FileDownloader().configureNotification(
       running: const TaskNotification('Downloading {displayName}', '{progress} · {networkSpeed}'),
       complete: const TaskNotification('Download complete', '{displayName} is ready'),
@@ -100,8 +124,24 @@ class ModelManager extends ChangeNotifier {
   }
 
   /// Starts (or restarts) the background download of [model].
+  ///
+  /// Never starts a second copy: if the downloader still has a task for the
+  /// model (for example after the app was reopened mid-download) it is kept,
+  /// and a paused download resumes from its partial file instead of
+  /// starting over. Two copies of one download would report alternating
+  /// progress.
   Future<void> download(ModelSpec model, {bool wifiOnly = false}) async {
     if (isReady(model) || stateOf(model).isActive) return;
+    final record = await FileDownloader().database.recordForId(model.id);
+    final progress = (record?.progress ?? 0).clamp(0.0, 1.0);
+    if (await FileDownloader().taskForId(model.id) != null) {
+      _set(model, ModelState(ModelStatus.downloading, progress: progress));
+      return;
+    }
+    if (record != null && record.status == TaskStatus.paused && record.task is DownloadTask) {
+      _set(model, ModelState(ModelStatus.downloading, progress: progress));
+      if (await FileDownloader().resume(record.task as DownloadTask)) return;
+    }
     final task = DownloadTask(
       taskId: model.id,
       url: model.url,
@@ -151,13 +191,23 @@ class ModelManager extends ChangeNotifier {
     }
   }
 
-  void _onUpdate(TaskUpdate update) {
+  /// Applies a status or progress report from the downloader.
+  @visibleForTesting
+  void handleUpdate(TaskUpdate update) {
     final model = ModelConfig.byId(update.task.taskId);
     if (model == null) return;
     switch (update) {
       case TaskProgressUpdate(:final progress):
         if (progress >= 0 && progress <= 1) {
-          _set(model, ModelState(ModelStatus.downloading, progress: progress));
+          // Progress shown for a running download never goes backwards. A
+          // lower value means a stale or duplicate report (or a restart the
+          // downloader handles itself); the bar holds until it catches up.
+          final current = stateOf(model);
+          final shown = current.isActive && progress < current.progress ? current.progress : progress;
+          if (shown != progress) {
+            debugPrint('${model.id}: ignoring lower progress $progress (showing ${current.progress})');
+          }
+          _set(model, ModelState(ModelStatus.downloading, progress: shown));
         }
       case TaskStatusUpdate(:final status, :final exception):
         switch (status) {
@@ -204,6 +254,11 @@ class ModelManager extends ChangeNotifier {
 
   void _set(ModelSpec model, ModelState state) {
     _states[model.id] = state;
+    if (state.isActive) {
+      _batch.add(model.id);
+    } else if (activeDownloads.isEmpty) {
+      _batch.clear();
+    }
     if (state.status == ModelStatus.ready || state.status == ModelStatus.failed) {
       for (final waiter in _waiters.remove(model.id) ?? const <Completer<void>>[]) {
         if (state.status == ModelStatus.ready) {

@@ -6,6 +6,9 @@ import '../theme/app_theme.dart';
 
 /// A slim progress strip shown while models download in the background.
 /// Tapping it opens the model screen.
+///
+/// Shows one combined figure for everything downloading (weighted by size),
+/// rather than switching between items, so the percentage only moves forward.
 class ModelDownloadBanner extends StatelessWidget {
   const ModelDownloadBanner({super.key});
 
@@ -15,13 +18,17 @@ class ModelDownloadBanner extends StatelessWidget {
     final active = models.activeDownloads;
     if (active.isEmpty) return const SizedBox.shrink();
 
-    final model = active.first;
-    final state = models.stateOf(model);
-    final label = switch (state.status) {
-      ModelStatus.verifying => 'Checking ${model.displayName}…',
-      ModelStatus.paused => '${model.displayName} paused, waiting for network · ${(state.progress * 100).round()}%',
-      _ => 'Downloading ${model.displayName} · ${(state.progress * 100).round()}%',
-    };
+    final batch = models.downloadBatch;
+    final percent = (models.batchProgress * 100).floor();
+    final what = batch.length == 1 ? batch.single.displayName : '${batch.length} downloads';
+    final states = [for (final m in active) models.stateOf(m).status];
+    final allVerifying = states.every((s) => s == ModelStatus.verifying);
+    final paused = states.contains(ModelStatus.paused);
+    final label = allVerifying
+        ? 'Checking ${active.length == 1 ? active.single.displayName : 'downloads'}…'
+        : paused
+            ? 'Downloading $what · $percent% · paused, waiting for network'
+            : 'Downloading $what · $percent%';
 
     return InkWell(
       onTap: () => Navigator.of(context).push(
@@ -35,7 +42,7 @@ class ModelDownloadBanner extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              active.length > 1 ? '$label  (+${active.length - 1} more)' : label,
+              label,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(color: AppTheme.processingText, fontSize: 12),
@@ -44,7 +51,7 @@ class ModelDownloadBanner extends StatelessWidget {
             ClipRRect(
               borderRadius: BorderRadius.circular(3),
               child: LinearProgressIndicator(
-                value: state.status == ModelStatus.verifying ? null : state.progress,
+                value: allVerifying ? null : models.batchProgress,
                 minHeight: 3,
                 color: AppTheme.processingText,
                 backgroundColor: AppTheme.processingBorder,
